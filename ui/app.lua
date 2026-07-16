@@ -19,6 +19,9 @@ local format = require("ui.format")
 local panel = require("ui.panel")
 local widgets = require("ui.widgets")
 
+-- For the anchor list: ar.panel owns the HUD layout, so it owns the corners.
+local arPanel = require("ar.panel")
+
 local app = {}
 app.__index = app
 
@@ -147,51 +150,152 @@ function app:drawBuffers(width, rows, theme)
     end
 end
 
+-- Step to the next entry of a list, wrapping around.
+local function cycleValue(list, current, step)
+    local index = 1
+    for i, value in ipairs(list) do
+        if value == current then index = i break end
+    end
+    return list[(index - 1 + (step or 1)) % #list + 1]
+end
+
+local NUDGE = 4
+local SCALES = {1, 2, 3, 4}
+local INTERVALS = {4, 8, 15, 30}
+
+function app:nextSource(settings)
+    local views = self.monitor:list()
+    if #views == 0 then return end
+    local index = 1
+    for i, view in ipairs(views) do
+        if view.id == (settings.source or monitorLib.AGGREGATE_ID) then index = i break end
+    end
+    local nextView = views[index % #views + 1]
+    settings.source = (nextView.id ~= monitorLib.AGGREGATE_ID) and nextView.id or nil
+    self.dirty = true
+end
+
 function app:drawGlasses(width, rows, theme)
     graphics.text(2, 1, "AR Glasses", theme.primary, true)
-    graphics.text(13, 1, "· pick what each pair of glasses displays", theme.muted, true)
+    graphics.text(13, 1, "· click a pair to configure it below", theme.muted, true)
     panel.rule(2, 2, width - 2, theme)
 
+    local addresses = {}
+    for address in component.list("glasses") do table.insert(addresses, address) end
+    table.sort(addresses)
+
+    if #addresses == 0 then
+        graphics.text(2, 4, "No glasses component found.", theme.muted, true)
+        graphics.text(2, 5, "Link a Terminal Glasses Bridge to this computer,", theme.muted, true)
+        graphics.text(2, 6, "and put the glasses in the bridge.", theme.muted, true)
+        return
+    end
+
+    -- Keep the selection valid: glasses can be unlinked while this page is open.
+    local stillPresent = false
+    for _, address in ipairs(addresses) do
+        if address == self.selectedGlasses then stillPresent = true break end
+    end
+    if not stillPresent then self.selectedGlasses = addresses[1] end
+
     local row = 4
-    local found = false
-    for address, componentType in component.list("glasses") do
-        found = true
-        if row > rows - 3 then break end
+    for _, address in ipairs(addresses) do
+        if row > rows - 12 then break end
         local settings = configuration.glassesFor(self.config, address)
+        local view = self.monitor:resolve(settings.source)
+        local caption = string.format("%-10s %-4s %s",
+            address:sub(1, 8),
+            settings.enabled and "on" or "off",
+            settings.cycle and "cycling all buffers" or ("→ " .. ((view and view.name) or "?")))
 
-        graphics.text(2, row, address:sub(1, 8), theme.text, true)
-        widgets.button(12, row, settings.enabled and "on" or "off", theme, function()
-            settings.enabled = not settings.enabled
-            self.dirty = true
-        end, nil, settings.enabled)
-
-        -- Cycling rotates through every view; otherwise the glasses are pinned
-        -- to one source chosen below.
-        widgets.button(22, row, settings.cycle and "cycle" or "pinned", theme, function()
-            settings.cycle = not settings.cycle
-            self.dirty = true
-        end, nil, settings.cycle)
-
-        local current = self.monitor:resolve(settings.source)
-        widgets.button(36, row, "source: " .. ((current and current.name) or "?"), theme, function()
-            -- Step through the available views in order.
-            local views = self.monitor:list()
-            local index = 1
-            for i, view in ipairs(views) do
-                if view.id == (settings.source or monitorLib.AGGREGATE_ID) then index = i break end
-            end
-            local nextView = views[index % #views + 1]
-            settings.source = (nextView.id ~= monitorLib.AGGREGATE_ID) and nextView.id or nil
-            self.dirty = true
-        end, nil, not settings.cycle)
-
+        widgets.listItem(2, row, width - 4, caption, theme, address == self.selectedGlasses,
+            function() self.selectedGlasses = address self.dirty = true end, nil, settings.enabled)
         row = row + 1
     end
 
-    if not found then
-        graphics.text(2, 4, "No glasses component found.", theme.muted, true)
-        graphics.text(2, 5, "Link a Terminal Glasses Bridge to this computer.", theme.muted, true)
+    -- Detail panel for the selected pair --------------------------------------
+    local settings = configuration.glassesFor(self.config, self.selectedGlasses)
+    row = row + 1
+    panel.rule(2, row, width - 2, theme)
+    row = row + 1
+    graphics.text(2, row, "Configuring " .. self.selectedGlasses:sub(1, 8), theme.text, true)
+    row = row + 2
+
+    local function label(name) graphics.text(2, row, name, theme.muted, true) end
+
+    label("Display")
+    widgets.button(14, row, settings.enabled and "on" or "off", theme, function()
+        settings.enabled = not settings.enabled self.dirty = true
+    end, nil, settings.enabled)
+    row = row + 1
+
+    label("Mode")
+    local x = 14
+    x = x + widgets.button(x, row, settings.cycle and "cycle" or "pinned", theme, function()
+        settings.cycle = not settings.cycle self.dirty = true
+    end, nil, settings.cycle) + 2
+
+    if settings.cycle then
+        graphics.text(x, row, "every", theme.muted, true)
+        widgets.button(x + 6, row, settings.cycleInterval .. "s", theme, function()
+            settings.cycleInterval = cycleValue(INTERVALS, settings.cycleInterval)
+            self.dirty = true
+        end, nil, true)
+    else
+        local view = self.monitor:resolve(settings.source)
+        widgets.button(x, row, "source: " .. ((view and view.name) or "?"), theme, function()
+            self:nextSource(settings)
+        end, nil, true)
     end
+    row = row + 1
+
+    -- Position ---------------------------------------------------------------
+    label("Position")
+    x = 14
+    x = x + widgets.button(x, row, settings.anchor, theme, function()
+        settings.anchor = cycleValue(arPanel.ANCHORS, settings.anchor)
+        self.dirty = true
+    end, nil, true) + 2
+    graphics.text(x, row, "← chat sits bottom-left, hotbar bottom-centre", theme.muted, true)
+    row = row + 1
+
+    label("Nudge")
+    x = 14
+    local function nudge(dx, dy)
+        return function()
+            settings.offsetX = (settings.offsetX or 0) + dx
+            settings.offsetY = (settings.offsetY or 0) + dy
+            self.dirty = true
+        end
+    end
+    x = x + widgets.button(x, row, "←", theme, nudge(-NUDGE, 0), nil, true) + 1
+    x = x + widgets.button(x, row, "→", theme, nudge(NUDGE, 0), nil, true) + 1
+    x = x + widgets.button(x, row, "↑", theme, nudge(0, -NUDGE), nil, true) + 1
+    x = x + widgets.button(x, row, "↓", theme, nudge(0, NUDGE), nil, true) + 2
+    x = x + widgets.button(x, row, "reset", theme, function()
+        settings.offsetX, settings.offsetY = 0, 0
+        self.dirty = true
+    end, nil, false) + 2
+    graphics.text(x, row, string.format("(%+d, %+d) px", settings.offsetX or 0, settings.offsetY or 0),
+        theme.muted, true)
+    row = row + 1
+
+    -- Rendering --------------------------------------------------------------
+    label("Card")
+    x = 14
+    x = x + widgets.button(x, row, settings.compact and "compact" or "full", theme, function()
+        settings.compact = not settings.compact self.dirty = true
+    end, nil, settings.compact) + 2
+    graphics.text(x, row, "GUI scale", theme.muted, true)
+    x = x + 10
+    x = x + widgets.button(x, row, tostring(settings.scale), theme, function()
+        settings.scale = cycleValue(SCALES, settings.scale)
+        self.dirty = true
+    end, nil, true) + 2
+    graphics.text(x, row, "must match Video Settings → GUI Scale", theme.muted, true)
+    row = row + 2
+
+    graphics.text(2, row, "Changes apply instantly. Press Save to keep them.", theme.muted, true)
 end
 
 -- Frame ---------------------------------------------------------------------

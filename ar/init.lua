@@ -38,7 +38,7 @@ local function signature(settings)
     return table.concat({
         tostring(settings.enabled), tostring(settings.compact),
         tostring(settings.scale), tostring(settings.resX), tostring(settings.resY),
-        tostring(settings.offsetX), tostring(settings.offsetY),
+        tostring(settings.anchor), tostring(settings.offsetX), tostring(settings.offsetY),
     }, "|")
 end
 

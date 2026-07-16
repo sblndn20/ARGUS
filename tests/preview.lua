@@ -71,12 +71,21 @@ local gpu = {
     end,
 }
 
+-- One fake pair of glasses, so the Glasses page has something to configure.
+local fakeTypes = {["3a2f1c9e-0000-4000-8000-000000000001"] = "glasses"}
+
 package.preload["component"] = function()
     return {
         gpu = gpu,
         isAvailable = function(name) return name == "gpu" or name == "screen" end,
-        list = function(filter)
+        list = function(filter, exact)
             local out = {}
+            for address, componentType in pairs(fakeTypes) do
+                local match = not filter
+                    or (exact and componentType == filter)
+                    or (not exact and componentType:find(filter, 1, true) ~= nil)
+                if match then out[address] = componentType end
+            end
             local key
             return setmetatable(out, {__call = function()
                 local k, v = next(out, key) key = k return k, v

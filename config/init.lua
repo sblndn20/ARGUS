@@ -73,6 +73,11 @@ function config.glassesDefaults()
         scale = 3,          -- Minecraft GUI scale: 1 Small, 2 Normal, 3 Large, 4+ Auto
         resX = 2560,
         resY = 1440,
+
+        -- Corner the HUD card snaps to. Defaults to top-left: chat sits in the
+        -- bottom-left, the hotbar bottom-centre, potion effects top-right.
+        anchor = "top-left",
+        -- Nudge from that corner, in glasses pixels.
         offsetX = 0,
         offsetY = 0,
     }

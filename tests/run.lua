@@ -435,6 +435,49 @@ check("ar panel survives a capacity-less view", ok2)
 arInstance:remove()
 eq("ar panel removes every object", countObjects(glasses), 0)
 
+-- AR anchoring -----------------------------------------------------------------
+--
+-- The card must be movable: anchored bottom-left it lands on top of Minecraft's
+-- chat, which is what the default of top-left avoids.
+
+eq("default anchor keeps clear of the chat", configuration.glassesDefaults().anchor, "top-left")
+
+-- Glasses space for the default 2560x1440 at GUI scale 3.
+local resolution = require("lib.utils.screen").size({2560, 1440}, 3)
+local cardWidth = 190
+
+local ax, ay = arPanel.anchorPosition("top-left", resolution, cardWidth)
+near("top-left sits at the left margin", ax, 4)
+near("top-left sits at the top margin", ay, 4)
+
+local bx, by = arPanel.anchorPosition("bottom-right", resolution, cardWidth)
+near("bottom-right is inset from the right edge", bx, resolution[1] - cardWidth - 4)
+check("bottom-right stays on screen", bx + cardWidth <= resolution[1])
+check("bottom-right sits below top-left", by > ay)
+
+local cx = arPanel.anchorPosition("top-center", resolution, cardWidth)
+near("top-center is horizontally centred", cx, (resolution[1] - cardWidth) / 2)
+
+-- Every declared anchor must resolve, and none may push the card off screen.
+for _, anchor in ipairs(arPanel.ANCHORS) do
+    local px, py = arPanel.anchorPosition(anchor, resolution, cardWidth)
+    check("anchor " .. anchor .. " stays within the viewport",
+        px >= 0 and py >= 0 and px + cardWidth <= resolution[1] and py <= resolution[2])
+end
+
+-- An unknown anchor (hand-edited config) must not crash or return nil.
+local fx, fy = arPanel.anchorPosition("nonsense", resolution, cardWidth)
+check("unknown anchor falls back rather than failing", type(fx) == "number" and type(fy) == "number")
+
+-- The nudge offsets apply on top of the anchor.
+local anchored = fakeGlasses()
+local nudged = configuration.glassesDefaults()
+nudged.anchor = "top-left"
+nudged.offsetX, nudged.offsetY = 12, 20
+local nudgedPanel = arPanel.new(anchored, nudged, theme)
+near("offsetX shifts the card right", nudgedPanel.x, 4 + 12)
+near("offsetY shifts the card down", nudgedPanel.y, 4 + 20)
+
 -- AR manager -------------------------------------------------------------------
 
 local arHud = require("ar")

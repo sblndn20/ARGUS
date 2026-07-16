@@ -23,6 +23,37 @@ panel.__index = panel
 local WIDTH = 190
 local HEIGHT = 34
 local COMPACT_WIDTH = 120
+local MARGIN = 4
+
+-- Where the card sits. Minecraft's own HUD is not negotiable, so the anchor has
+-- to be the user's choice: chat occupies the bottom-left, the hotbar and health
+-- the bottom-centre, potion effects the top-right. top-left is the default
+-- because it is usually the emptiest.
+panel.ANCHORS = {
+    "top-left", "top-center", "top-right",
+    "bottom-left", "bottom-center", "bottom-right",
+}
+
+local function anchorPosition(anchor, resolution, width)
+    local left = MARGIN
+    local center = (resolution[1] - width) / 2
+    local right = resolution[1] - width - MARGIN
+    local top = MARGIN
+    local bottom = resolution[2] - HEIGHT - MARGIN
+
+    local positions = {
+        ["top-left"]      = {left, top},
+        ["top-center"]    = {center, top},
+        ["top-right"]     = {right, top},
+        ["bottom-left"]   = {left, bottom},
+        ["bottom-center"] = {center, bottom},
+        ["bottom-right"]  = {right, bottom},
+    }
+    local position = positions[anchor] or positions["top-left"]
+    return position[1], position[2]
+end
+
+panel.anchorPosition = anchorPosition
 
 local STATE_COLORS = {
     [states.ONLINE]  = palette.green,
@@ -44,9 +75,10 @@ function panel.new(glasses, settings, theme)
     local resolution = screen.size({settings.resX, settings.resY}, settings.scale)
     local width = settings.compact and COMPACT_WIDTH or WIDTH
 
-    -- Anchor bottom-left, then apply the user's offset.
-    local x = 4 + (settings.offsetX or 0)
-    local y = resolution[2] - HEIGHT - 4 + (settings.offsetY or 0)
+    -- Snap to the chosen corner, then apply the user's nudge on top.
+    local x, y = anchorPosition(settings.anchor, resolution, width)
+    x = x + (settings.offsetX or 0)
+    y = y + (settings.offsetY or 0)
 
     local self = setmetatable({
         glasses = glasses,
