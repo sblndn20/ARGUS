@@ -35,6 +35,16 @@ function sources.byKind(kind)
     return nil
 end
 
+-- getName() can hand back an unlocalized key rather than a name — a live LSC
+-- answers "multimachine.supercapacitor". Showing that verbatim is worse than
+-- showing what the adapter already knows the machine is. A key is recognisable
+-- by having dots and no spaces; a real name never looks like that.
+local function displayName(reported, adapter)
+    if type(reported) ~= "string" or reported == "" then return adapter.label end
+    if reported:find("%.") and not reported:find("%s") then return adapter.label end
+    return reported
+end
+
 local function handlesType(adapter, componentType)
     for i = 1, #adapter.componentTypes do
         if adapter.componentTypes[i] == componentType then return true end
@@ -90,7 +100,7 @@ function sources.discover()
                         componentType = componentType,
                         kind = adapter.kind,
                         label = adapter.label,
-                        name = util.call(proxy, "getName") or adapter.label,
+                        name = displayName(util.call(proxy, "getName"), adapter),
                         hasWireless = adapter.kind == "lsc"
                             and lines ~= nil
                             and sensor.find(lines, "Wireless mode") ~= nil,
@@ -136,7 +146,8 @@ function sources.read(entry)
 
     reading.address = entry.address
     reading.kind = adapter.kind
-    reading.name = entry.name or util.call(proxy, "getName") or adapter.label
+    -- A name the user typed always wins.
+    reading.name = entry.name or displayName(util.call(proxy, "getName"), adapter)
     reading.state = reading.state or states.IDLE
     return reading
 end

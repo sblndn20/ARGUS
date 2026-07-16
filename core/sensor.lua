@@ -55,8 +55,12 @@ function sensor.findAll(lines, pattern)
     return out
 end
 
+-- GTNH writes standard form as "2.64x10^11", not "2.64E11" — checking only for
+-- an `E` exponent misses it entirely and the digit scrape yields the nonsense
+-- 2641011. Both spellings are matched.
 local function looksScientific(body)
     return body:match("%d%s*[eE]%s*%+?%s*%d") ~= nil
+        or body:match("%d%s*[xX]%s*10%s*%^%s*%-?%d") ~= nil
 end
 
 -- Parse the numeric payload of a sensor line.
@@ -82,11 +86,17 @@ function sensor.amount(line)
 
     if looksScientific(body) then
         local mantissa, exponent = body:match("([%d.]+)%s*[eE]%s*%+?%s*(%d+)")
+        if not mantissa then
+            mantissa, exponent = body:match("([%d.]+)%s*[xX]%s*10%s*%^%s*(%-?%d+)")
+        end
         if mantissa and exponent then
             local value = tonumber(mantissa) * 10 ^ tonumber(exponent)
             if negative then value = -value end
             return value, nil
         end
+        -- Recognised as standard form but unparseable: better to admit that
+        -- than to fall through and scrape the exponent's digits into the number.
+        return nil, nil
     end
 
     local digits = body:gsub("%D", "")

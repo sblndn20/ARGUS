@@ -71,7 +71,7 @@ Computronics `1.9.3-GTNH`).
 
 ```shell
 cd /home
-wget -f https://cdn.jsdelivr.net/gh/sblndn20/ARGUS@v2.3.1/setup.lua && setup
+wget -f https://cdn.jsdelivr.net/gh/sblndn20/ARGUS@v2.3.2/setup.lua && setup
 ```
 
 Установщик сам переберёт зеркала, скачает файлы в `/home/ARGUS` и предложит включить
@@ -85,7 +85,7 @@ wget -f https://cdn.jsdelivr.net/gh/sblndn20/ARGUS@v2.3.1/setup.lua && setup
 Через `raw.githubusercontent.com` — если он у вас доступен из игры (см. ниже):
 
 ```shell
-wget -f https://raw.githubusercontent.com/sblndn20/ARGUS/v2.3.1/setup.lua && setup
+wget -f https://raw.githubusercontent.com/sblndn20/ARGUS/v2.3.2/setup.lua && setup
 ```
 
 Полезные ключи:
@@ -93,7 +93,7 @@ wget -f https://raw.githubusercontent.com/sblndn20/ARGUS/v2.3.1/setup.lua && set
 ```shell
 setup --repo=user/repo                 # ставить из форка
 setup --mirror=raw                     # заставить конкретное зеркало
-setup --branch=v2.3.1                  # конкретный тег
+setup --branch=v2.3.2                  # конкретный тег
 setup --branch=<commit-sha>            # точная ревизия
 setup --branch=main                    # неопубликованный код (см. предупреждение выше)
 ```

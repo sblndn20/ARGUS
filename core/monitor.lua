@@ -129,16 +129,17 @@ function monitor:buildView(id, base, now)
     }
     view.fillSeconds, view.fillDirection = metrics.projection(view.stored, view.capacity, view.net)
 
-    -- A buffer whose charge is visibly moving is not idle, whatever the
-    -- throughput counters say.
+    -- A buffer whose charge is moving beyond its own leakage is not idle,
+    -- whatever the throughput counters say.
     --
-    -- The adapters decide IDLE from EU IN/OUT, and those only count what crossed
-    -- a hatch: an LSC in wireless mode reported no flow at all while shedding
-    -- hundreds of millions of EU. Compared against the noise floor rather than
-    -- zero, so rounding on a nearly-full LSC cannot flicker the state.
+    -- Passive loss is subtracted first, because an untouched LSC always leaks —
+    -- comparing the raw rate against zero would call every capacitor in the game
+    -- ONLINE forever. And the comparison is against the noise floor rather than
+    -- zero so that rounding on a nearly-full LSC cannot flicker the state.
     if view.state == states.IDLE then
+        local beyondLeak = math.abs((view.net or 0) + (view.passiveLoss or 0))
         local floor = metrics.noiseFloor(view.stored, metrics.RATE_WINDOW)
-        if math.abs(view.net or 0) > math.max(floor, 1) then
+        if beyondLeak > math.max(floor, 1) then
             view.state = states.ONLINE
         end
     end

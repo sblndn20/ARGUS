@@ -5,9 +5,9 @@
 --
 -- Everything below the renderers is pure Lua, so the sensor parsing, the rate
 -- maths and the formatting can all be verified without an OpenComputers
--- machine. The sensor fixtures reproduce GTNH 2.8.3 (GT5U 5.09.51.482) output,
--- including its § colour codes and its duplicated
--- separator-formatted/scientific value pairs.
+-- machine. The LSC fixture is a real capture from a live GTNH 2.8.3 game,
+-- taken with tools/sensordump.lua — § colour codes, "x10^" standard form,
+-- instantaneous EU IN/OUT reading 0 on a busy capacitor, and all.
 
 package.path = "./?.lua;./?/init.lua;" .. package.path
 
@@ -187,34 +187,61 @@ end
 
 -- Fixtures -------------------------------------------------------------------
 
--- A GTNH 2.8.3 LSC in wireless mode. 24 lines, colour codes intact.
+-- A real GTNH 2.8.3 LSC, captured from a live game with tools/sensordump.lua.
+-- This replaced a fixture reconstructed from the Java sources, and the real
+-- thing differs in ways that mattered:
+--
+--   * "2.64x10^11" — NOT "2.64E11". A check for an `E` exponent does not see
+--     this at all and scrapes it into the nonsense 2641011.
+--   * EU IN / EU OUT (8, 9) are INSTANTANEOUS and usually 0: the capacitor
+--     moves power in bursts, so a poll almost always lands in a gap. Reading
+--     them as "is anything flowing" reports a busy LSC as idle.
+--   * the Avg lines carry no EU/t suffix, but are rates all the same — a
+--     1-hour figure below the 5-minute one is impossible for totals.
+--
+-- This capacitor is quiet at this instant while averaging 77M EU/t in and 86M
+-- out over five minutes, which is exactly the case that misread as IDLE.
 local function lscSensor(overrides)
     local lines = {
         "§eOperational Data:§r",
-        "EU Stored: §a1,234,567,890§r EU",
-        "EU Stored: §a1.234E9§r EU",
-        "Used Capacity: §e12.34%§r",
-        "Total Capacity: §e10,000,000,000§r EU",
-        "Total Capacity: §e1.000E10§r EU",
-        "Passive Loss: §c1,328§r EU/t",
-        "EU IN: §a32,768§r EU/t",
+        "EU Stored: §a263,870,238,034§r EU",
+        "EU Stored: §a2.64x10^11§r EU",
+        "Used Capacity: §e81.44%§r",
+        "Total Capacity: §e324,000,000,000§r EU",
+        "Total Capacity: §e3.24x10^11§r EU",
+        "Passive Loss: §c1,875§r EU/t",
+        "EU IN: §a0§r EU/t",
         "EU OUT: §c0§r EU/t",
-        "Avg EU IN: §a30,000§r (last 20 seconds)",
-        "Avg EU OUT: §c1,000§r (last 20 seconds)",
-        "Avg EU IN: §a28,000§r (last 5 minutes)",
-        "Avg EU OUT: §c2,000§r (last 5 minutes)",
-        "Avg EU IN: §a25,000§r (last 1 hour)",
-        "Avg EU OUT: §c5,000§r (last 1 hour)",
-        "Time to Full: §e3 hours§r",
+        "Avg EU IN: §a0§r (last 5 seconds)",
+        "Avg EU OUT: §c0§r (last 5 seconds)",
+        "Avg EU IN: §a77,311,372§r (last 5 minutes)",
+        "Avg EU OUT: §c85,899,343§r (last 5 minutes)",
+        "Avg EU IN: §a77,430,574§r (last 1 hour)",
+        "Avg EU OUT: §c78,263,846§r (last 1 hour)",
+        "Time to Empty: §e81.44 days§r",
         "Maintenance Status: §aWorking perfectly§r",
-        "Wireless mode: §aenabled§r",
-        "UHV Capacitors detected: §e4§r",
+        "Wireless mode: §cdisabled§r",
+        "UHV Capacitors detected: §e0§r",
         "UEV Capacitors detected: §e0§r",
         "UIV Capacitors detected: §e0§r",
         "UMV Capacitors detected: §e0§r",
-        "Total wireless EU: §a9,876,543,210§r EU",
-        "Total wireless EU: §a9.876E9§r EU",
+        "Total wireless EU: §a0§r EU",
+        "Total wireless EU: §a0§r EU",
     }
+    for index, value in pairs(overrides or {}) do lines[index] = value end
+    return lines
+end
+
+-- The same capacitor with power actually moving and wireless mode on.
+local function activeSensor(overrides)
+    local lines = lscSensor({
+        [8] = "EU IN: §a32,768§r EU/t",
+        [10] = "Avg EU IN: §a32,768§r (last 5 seconds)",
+        [11] = "Avg EU OUT: §c1,000§r (last 5 seconds)",
+        [18] = "Wireless mode: §aenabled§r",
+        [23] = "Total wireless EU: §a9,876,543,210§r EU",
+        [24] = "Total wireless EU: §a9.876x10^9§r EU",
+    })
     for index, value in pairs(overrides or {}) do lines[index] = value end
     return lines
 end
@@ -303,7 +330,7 @@ eq("lines strips colour codes", lines[17], "Maintenance Status: Working perfectl
 
 -- Both an exact and a scientific line exist; the exact one must win.
 value, exact = sensor.bestValue(lines, "^%s*EU Stored")
-eq("bestValue prefers the exact variant", exact, "1234567890")
+eq("bestValue prefers the exact variant", exact, "263870238034")
 
 -- lsc ------------------------------------------------------------------------
 
@@ -312,51 +339,67 @@ local states = require("core.states")
 
 check("lsc detects a capacitor", lsc.detect(nil, lines) > 0)
 
+-- Values below are the real capacitor's, straight from the dump.
 local reading = lsc.read(proxy(lscSensor()), lines)
-eq("lsc reads stored", reading.stored, 1234567890)
-eq("lsc reads stored exactly", reading.storedText, "1234567890")
-eq("lsc reads capacity", reading.capacity, 10000000000)
-eq("lsc reads passive loss", reading.passiveLoss, 1328)
--- "EU IN:" must not be confused with "Avg EU IN:".
-eq("lsc reads EU IN, not Avg EU IN", reading.euIn, 32768)
-eq("lsc reads EU OUT", reading.euOut, 0)
+eq("lsc reads stored", reading.stored, 263870238034)
+eq("lsc reads stored exactly", reading.storedText, "263870238034")
+eq("lsc reads capacity", reading.capacity, 324000000000)
+eq("lsc reads passive loss", reading.passiveLoss, 1875)
 eq("lsc reads no problems", reading.problems, 0)
-eq("lsc is online when power flows", reading.state, states.ONLINE)
--- GTNH computes these windows itself, so ARGUS uses them rather than resampling.
-eq("lsc takes the 5-minute average from the sensor", reading.avg5m, 26000)
-eq("lsc takes the 1-hour average from the sensor", reading.avg1h, 20000)
--- In and out are kept apart: a net rate cannot say how much actually moved.
-eq("lsc reports 5-minute input separately", reading.avg5mIn, 28000)
-eq("lsc reports 5-minute output separately", reading.avg5mOut, 2000)
-eq("lsc reports 1-hour input separately", reading.avg1hIn, 25000)
-eq("lsc reports 1-hour output separately", reading.avg1hOut, 5000)
+
+-- The five-minute averages, not the instantaneous lines, are what say this
+-- capacitor is busy: 77.3M EU/t in against 85.9M out.
+eq("lsc reports 5-minute input separately", reading.avg5mIn, 77311372)
+eq("lsc reports 5-minute output separately", reading.avg5mOut, 85899343)
+eq("lsc reports 1-hour input separately", reading.avg1hIn, 77430574)
+eq("lsc reports 1-hour output separately", reading.avg1hOut, 78263846)
+eq("lsc nets the 5-minute average", reading.avg5m, 77311372 - 85899343)
+eq("lsc nets the 1-hour average", reading.avg1h, 77430574 - 78263846)
+
+-- This capacitor has wireless mode off, so no wireless view hangs off it.
+eq("wireless off is reported as disabled", reading.wireless.enabled, false)
+
+-- "2.64x10^11", not "2.64E11". A check for an `E` exponent does not see this
+-- and the digit scrape turns it into 2641011 — which would have won had it come
+-- first. The separator-formatted line must be the one that counts.
+local scientific = sensor.amount("EU Stored: §a2.64x10^11§r EU")
+near("standard form with x10^ is parsed", scientific, 2.64e11, 1e-3)
+eq("and yields no exact digits", select(2, sensor.amount("EU Stored: §a2.64x10^11§r EU")), nil)
+
+-- Throughput, in order of preference -------------------------------------------
+--
+-- The plain EU IN line is INSTANTANEOUS. A capacitor moves power in bursts, so
+-- a poll almost always lands in a gap: the live dump had EU IN and EU OUT at 0
+-- while the five-minute averages sat at 77M and 86M EU/t, and the buffer was
+-- reported IDLE. The short rolling average is the honest "now".
+
+local activeLines = require("core.sensor").lines(proxy(activeSensor()))
+reading = lsc.read(proxy(activeSensor()), activeLines)
+eq("the 5-second average is preferred for EU IN", reading.euIn, 32768)
+eq("the 5-second average is preferred for EU OUT", reading.euOut, 1000)
+eq("flowing power reads as online", reading.state, states.ONLINE)
 check("lsc reports wireless mode", reading.wireless ~= nil and reading.wireless.enabled == true)
 eq("lsc reads the wireless balance", reading.wireless.stored, 9876543210)
 
--- The sensor wins over the getters.
---
--- This order matters and used to be reversed. Zero is TRUE in Lua, so
--- `getter() or sensor` short-circuits on a getter that answers 0 and the sensor
--- is never read — the buffer then sits at IDLE with no flow while the sensor
--- plainly reports 32,768 EU/t. getAverageElectricInput() is the generic
--- BaseMetaTileEntity counter, not what a multiblock's energy hatches moved.
-reading = lsc.read(proxy(lscSensor(), {
+-- The getters are last, and on a real LSC they are useless: the dump showed
+-- getEUInputAverage() and getEUOutputAverage() at 0 on a working capacitor.
+-- They must never mask the sensor — note zero is TRUE in Lua, so an `or` chain
+-- on the VALUE (rather than on nil) short-circuits and never reads the sensor.
+reading = lsc.read(proxy(activeSensor(), {
     getEUInputAverage = function() return 0 end,
     getEUOutputAverage = function() return 0 end,
-}), lines)
-eq("a zero getter does not mask the sensor's EU IN", reading.euIn, 32768)
-eq("a zero getter does not mask the sensor's EU OUT", reading.euOut, 0)
+}), activeLines)
+eq("a zero getter does not mask the sensor's input", reading.euIn, 32768)
 eq("and the buffer is not reported idle", reading.state, states.ONLINE)
 
--- The getters still serve when the sensor says nothing.
-local noRates = lscSensor()
-table.remove(noRates, 9) -- "EU OUT"
-table.remove(noRates, 8) -- "EU IN"
+-- They still serve when the sensor says nothing at all.
+local noRates = activeSensor()
+for _, index in ipairs({11, 10, 9, 8}) do table.remove(noRates, index) end
 local noRateLines = require("core.sensor").lines(proxy(noRates))
 reading = lsc.read(proxy(noRates, {
     getEUInputAverage = function() return 12345 end,
 }), noRateLines)
-eq("the getter is used when the sensor lacks the line", reading.euIn, 12345)
+eq("the getter is used when the sensor lacks the lines", reading.euIn, 12345)
 
 -- Maintenance and disabled states.
 local brokenLines = require("core.sensor").lines(
@@ -509,7 +552,7 @@ check("format.percent keeps detail near empty", format.percent(0.00005) ~= "0.0%
 
 local monitorLib = require("core.monitor")
 
-fakeComponents["lsc-address"] = proxy(lscSensor())
+fakeComponents["lsc-address"] = proxy(activeSensor())
 fakeTypes["lsc-address"] = "gt_machine"
 local config = {buffers = {{address = "lsc-address", name = "Main LSC", kind = "lsc", enabled = true}}}
 local monitor = monitorLib.new(config)
@@ -519,7 +562,7 @@ monitor:update()
 
 local view = monitor:get("lsc-address")
 check("monitor builds a view for the buffer", view ~= nil)
-near("monitor computes the fill fraction", view.percent, 0.123456789)
+near("monitor computes the fill fraction", view.percent, 263870238034 / 324000000000)
 eq("monitor names the view from config", view.name, "Main LSC")
 
 -- Wireless is not a component; it must surface as its own view off the LSC.
@@ -533,7 +576,7 @@ local aggregate = monitor:get(monitorLib.AGGREGATE_ID)
 check("monitor builds an aggregate", aggregate ~= nil)
 -- The aggregate must sum only real buffers; counting the wireless view too
 -- would double-count energy that is not in the capacitor.
-eq("aggregate sums real buffers only", aggregate.stored, 1234567890)
+eq("aggregate sums real buffers only", aggregate.stored, 263870238034)
 
 -- Energy moved over a window -----------------------------------------------------
 --
@@ -559,14 +602,15 @@ check("a longer window lowers the floor",
     metrics.noiseFloor(9.2e18, 10) < metrics.noiseFloor(9.2e18, 2))
 
 -- 28,000 EU/t in over 5 minutes = 28000 * 300 * 20.
+-- The real capacitor's figures: 77.3M EU/t in over five minutes is 463.9G EU.
 eq("5-minute received is the input average over the window",
-    view.total5m.received, 28000 * 300 * 20)
+    view.total5m.received, 77311372 * 300 * 20)
 eq("5-minute sent is the output average over the window",
-    view.total5m.sent, 2000 * 300 * 20)
+    view.total5m.sent, 85899343 * 300 * 20)
 eq("5-minute net is the difference over the window",
-    view.total5m.net, 26000 * 300 * 20)
-eq("1-hour received spans the hour", view.total1h.received, 25000 * 3600 * 20)
-eq("1-hour net spans the hour", view.total1h.net, 20000 * 3600 * 20)
+    view.total5m.net, (77311372 - 85899343) * 300 * 20)
+eq("1-hour received spans the hour", view.total1h.received, 77430574 * 3600 * 20)
+eq("1-hour net spans the hour", view.total1h.net, (77430574 - 78263846) * 3600 * 20)
 
 -- With no measured history yet, the net falls back to GregTech's counters and
 -- the three columns agree.
@@ -600,14 +644,25 @@ end
 check("a drain the counters miss still shows in the rate", (drainedView.net or 0) < -1e6)
 eq("and the buffer is not reported idle", drainedView.state, states.ONLINE)
 
--- A buffer that truly is still must stay IDLE — the upgrade above must not fire
--- on rounding noise.
+-- A capacitor doing nothing but leaking must stay IDLE. Passive loss is
+-- subtracted before judging activity, because every LSC leaks forever —
+-- comparing the raw rate against zero would call them all ONLINE always.
+--
+-- Leaking exactly its passive loss: 1900 EU/t is 38,000 EU a second.
 local still
 for i = 0, 10 do
-    still = drained:buildView("still-lsc", drainingReading(1e15), 4000 + i)
+    still = drained:buildView("still-lsc", drainingReading(1e15 - i * 38000), 4000 + i)
 end
--- Only the passive loss is claimed, and the charge confirms nothing is moving.
-eq("a motionless buffer stays idle", still.state, states.IDLE)
+eq("a capacitor that only leaks stays idle", still.state, states.IDLE)
+near("and its rate is the passive loss", still.net, -1900, 0.01)
+
+-- But something holding the charge steady against that leak is feeding it, and
+-- that is activity — an input of exactly the passive loss.
+local held
+for i = 0, 10 do
+    held = drained:buildView("held-lsc", drainingReading(1e15), 5000 + i)
+end
+eq("a charge held against its own leak is online", held.state, states.ONLINE)
 
 -- The wireless network reports no throughput, so its totals are unknown rather
 -- than a confident zero.
@@ -866,6 +921,37 @@ hud:update(monitor)
 near("manual resolution overrides the reported one",
     hud.panels["glasses-1"].instance.x, 1920 / 2 - 190 - 4)
 
+-- Machine names ------------------------------------------------------------------
+--
+-- getName() can answer with an unlocalized key instead of a name: a live LSC
+-- returns "multimachine.supercapacitor". Showing that verbatim is worse than
+-- showing what the adapter already knows the machine is.
+
+local sources = require("core.sources")
+
+fakeComponents["keyed-lsc"] = proxy(activeSensor(), {
+    getName = function() return "multimachine.supercapacitor" end,
+})
+fakeTypes["keyed-lsc"] = "gt_machine"
+
+local keyed = sources.read({address = "keyed-lsc", kind = "lsc"})
+eq("an unlocalized key is replaced with the adapter's label",
+    keyed.name, "Lapotronic Supercapacitor")
+
+-- A real name must survive untouched.
+fakeComponents["named-machine"] = proxy(activeSensor(), {
+    getName = function() return "Lapotronic Super Capacitor" end,
+})
+fakeTypes["named-machine"] = "gt_machine"
+eq("a real name is kept",
+    sources.read({address = "named-machine", kind = "lsc"}).name,
+    "Lapotronic Super Capacitor")
+
+-- And a name the user typed always wins.
+eq("a custom name outranks both",
+    sources.read({address = "keyed-lsc", kind = "lsc", name = "Main bank"}).name,
+    "Main bank")
+
 -- Custom names -----------------------------------------------------------------
 --
 -- A name the user typed must outrank the machine's own everywhere, and must
@@ -884,7 +970,7 @@ eq("a new buffer is added", #named.buffers, 2)
 eq("a new buffer takes the machine's name", named.buffers[2].name, "Battery Buffer")
 
 -- The custom name is what reaches the renderers.
-fakeComponents["named-lsc"] = proxy(lscSensor())
+fakeComponents["named-lsc"] = proxy(activeSensor())
 fakeTypes["named-lsc"] = "gt_machine"
 local namedMonitor = monitorLib.new({
     buffers = {{address = "named-lsc", name = "Reactor bank", kind = "lsc", enabled = true}},
@@ -1001,7 +1087,7 @@ for _, buffer in ipairs(payload.buffers) do
     if buffer.id == "lsc-address" then lscBuffer = buffer end
 end
 check("the LSC is in the payload", lscBuffer ~= nil)
-eq("the exact stored string is carried over the wire", lscBuffer.storedText, "1234567890")
+eq("the exact stored string is carried over the wire", lscBuffer.storedText, "263870238034")
 eq("the custom name is carried over the wire", lscBuffer.name, "Outpost LSC")
 
 -- A poll gets answered.

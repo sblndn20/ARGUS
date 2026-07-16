@@ -64,20 +64,31 @@ function lsc.read(proxy, lines)
     end
     local capacity, capacityText = sensor.bestValue(lines, "^%s*Total Capacity")
 
-    -- Sensor text FIRST, getters as the fallback — the reverse of the obvious
-    -- order, for two reasons.
+    -- Throughput, in order of preference.
     --
-    -- The sensor lines are what GregTech shows in the machine's own GUI, and the
-    -- LSC renders them from the figures it tracks for its energy hatches.
-    -- getEUInputAverage() is the generic BaseMetaTileEntity counter, which is not
-    -- the same thing for a multiblock.
+    -- The short rolling average ("Avg EU IN: N (last 5 seconds)") first, because
+    -- the plain "EU IN" line is INSTANTANEOUS: a capacitor moves power in bursts,
+    -- so a poll almost always lands in a gap and reads 0. A live dump caught this
+    -- exactly — EU IN and EU OUT both 0 while the five-minute averages sat at 77M
+    -- and 86M EU/t — and the buffer was reported IDLE.
     --
-    -- And `getter() or sensor` was outright broken: zero is TRUE in Lua, so a
-    -- getter answering 0 short-circuits and the sensor is never consulted. The
-    -- buffer then reads as IDLE with no flow while the sensor plainly says
-    -- otherwise.
-    local euIn = sensor.value(lines, "^%s*EU IN") or util.callNumber(proxy, "getEUInputAverage")
-    local euOut = sensor.value(lines, "^%s*EU OUT") or util.callNumber(proxy, "getEUOutputAverage")
+    -- The getters come last and are near-useless here: the same dump showed
+    -- getEUInputAverage() and getEUOutputAverage() returning 0 on a working LSC.
+    -- getAverageElectricInput() is the generic BaseMetaTileEntity counter, not
+    -- what a multiblock's energy hatches moved.
+    --
+    -- Note each step is `or`-chained on nil, not on 0: zero is TRUE in Lua, and
+    -- an earlier version's `getter() or sensor` short-circuited on a getter
+    -- answering 0 so the sensor was never read at all.
+    local function throughput(shortAverage, instant, getter)
+        local value = sensor.value(lines, shortAverage)
+        if value == nil then value = sensor.value(lines, instant) end
+        if value == nil then value = util.callNumber(proxy, getter) end
+        return value
+    end
+
+    local euIn = throughput("Avg EU IN.*second", "^%s*EU IN", "getEUInputAverage")
+    local euOut = throughput("Avg EU OUT.*second", "^%s*EU OUT", "getEUOutputAverage")
 
     local reading = {
         stored = stored or 0,
