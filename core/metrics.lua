@@ -33,6 +33,12 @@ metrics.GRAPH_COLUMNS = GRAPH_COLUMNS
 
 local TICKS_PER_SECOND = 20
 
+-- Seconds the live rate is measured over. Short enough that the figure keeps up
+-- with the graph beside it, long enough to stay clear of rounding noise on a
+-- nearly-full LSC (see metrics.noiseFloor).
+local RATE_WINDOW = 2
+metrics.RATE_WINDOW = RATE_WINDOW
+
 -- Sample spacing for a given window. This is the whole point of the design: the
 -- window divided by the column count IS the step, so a 2-minute window plots one
 -- point per second. Floored at the poll rate, below which there is nothing new
@@ -110,6 +116,22 @@ function metrics.average(tracker, now, window)
     -- Refuse to label a 2-minute sample as a 1-hour average.
     if (now - oldest) < math.min(window, 60) then return nil end
     return slope(tracker.slow, now, window)
+end
+
+-- The smallest rate that can be told apart from rounding noise at this charge.
+--
+-- `stored` is a double. Past 2^53 consecutive representable values are spaced
+-- ULP apart — about 2048 EU near a full LSC — so differencing two samples
+-- carries that much error, and dividing by the window turns it into a rate.
+-- Below 2^53 the spacing is under 1 EU and there is nothing to allow for.
+--
+-- Used to decide whether a buffer is genuinely still, rather than trusting a
+-- measurement that is really just rounding.
+function metrics.noiseFloor(stored, window)
+    stored = math.abs(stored or 0)
+    if stored < 2 ^ 53 then return 0 end
+    local ulp = stored * 2 ^ -52
+    return (2 * ulp) / ((window or RATE_WINDOW) * TICKS_PER_SECOND)
 end
 
 -- Energy moved over a window, from an average rate in EU/t.

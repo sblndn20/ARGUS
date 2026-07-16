@@ -543,6 +543,21 @@ eq("aggregate sums real buffers only", aggregate.stored, 1234567890)
 eq("a rate becomes energy over a window", metrics.energyOver(100, 60), 100 * 60 * 20)
 eq("an unknown rate stays unknown", metrics.energyOver(nil, 60), nil)
 
+-- Rounding noise ------------------------------------------------------------------
+--
+-- Past 2^53 a double's neighbours are ULP apart, so differencing `stored` on a
+-- nearly-full LSC carries real error. Below that there is nothing to allow for.
+-- This is what stops the IDLE→ONLINE upgrade firing on rounding alone.
+
+eq("an ordinary charge has no rounding noise", metrics.noiseFloor(1e9, 2), 0)
+eq("a charge just under 2^53 has none either", metrics.noiseFloor(2 ^ 53 - 1, 2), 0)
+check("a nearly-full LSC has a real noise floor", metrics.noiseFloor(9.2e18, 2) > 0)
+-- ~2048 EU of ULP, doubled for two samples, over 2s = 40 ticks.
+near("the floor follows the ULP", metrics.noiseFloor(9.2e18, 2),
+    (2 * (9.2e18 * 2 ^ -52)) / 40, 0.01)
+check("a longer window lowers the floor",
+    metrics.noiseFloor(9.2e18, 10) < metrics.noiseFloor(9.2e18, 2))
+
 -- 28,000 EU/t in over 5 minutes = 28000 * 300 * 20.
 eq("5-minute received is the input average over the window",
     view.total5m.received, 28000 * 300 * 20)
@@ -553,12 +568,46 @@ eq("5-minute net is the difference over the window",
 eq("1-hour received spans the hour", view.total1h.received, 25000 * 3600 * 20)
 eq("1-hour net spans the hour", view.total1h.net, 20000 * 3600 * 20)
 
--- The three columns are read side by side, so they must add up. A net measured
--- independently of the in/out it sits next to makes the panel look broken.
-eq("5-minute net equals received minus sent",
+-- With no measured history yet, the net falls back to GregTech's counters and
+-- the three columns agree.
+eq("5-minute net falls back to received minus sent",
     view.total5m.net, view.total5m.received - view.total5m.sent)
-eq("1-hour net equals received minus sent",
+eq("1-hour net falls back to received minus sent",
     view.total1h.net, view.total1h.received - view.total1h.sent)
+
+-- But once the charge has been watched, the charge wins. EU IN/OUT only count
+-- what crossed a hatch: an LSC draining to a wireless network reported no flow
+-- at all while shedding hundreds of millions of EU, and net read as the passive
+-- loss. The gap between the counters and the charge is information, not an error.
+local drained = monitorLib.new({buffers = {}, screen = {graphWindow = 600}})
+
+-- What a wireless LSC looks like: the counters report nothing moving, only the
+-- passive loss, while the charge falls by 700M a second.
+local function drainingReading(stored)
+    return {
+        name = "Wireless LSC", kind = "lsc", state = states.IDLE,
+        stored = stored, capacity = 1e18,
+        euIn = 0, euOut = 0, passiveLoss = 1900, problems = 0,
+    }
+end
+
+local drainedView
+for i = 0, 10 do
+    drainedView = drained:buildView("wireless-lsc", drainingReading(1e15 - i * 700e6), 3000 + i)
+end
+
+-- Reading the counters, this would be -1900 EU/t. The charge says otherwise.
+check("a drain the counters miss still shows in the rate", (drainedView.net or 0) < -1e6)
+eq("and the buffer is not reported idle", drainedView.state, states.ONLINE)
+
+-- A buffer that truly is still must stay IDLE — the upgrade above must not fire
+-- on rounding noise.
+local still
+for i = 0, 10 do
+    still = drained:buildView("still-lsc", drainingReading(1e15), 4000 + i)
+end
+-- Only the passive loss is claimed, and the charge confirms nothing is moving.
+eq("a motionless buffer stays idle", still.state, states.IDLE)
 
 -- The wireless network reports no throughput, so its totals are unknown rather
 -- than a confident zero.

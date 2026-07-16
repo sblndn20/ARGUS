@@ -84,38 +84,35 @@ function monitor:buildView(id, base, now)
     view.stored = view.stored or 0
     view.percent = (view.capacity > 0) and math.min(view.stored / view.capacity, 1.0) or nil
 
-    -- Prefer the source's own throughput; fall back to differencing `stored`.
+    -- The change in `stored` is the truth. EU IN/OUT is only a fallback.
     --
-    -- This order used to be reversed, and it was wrong twice over. GregTech
-    -- averages EU IN/OUT over 20 ticks, so it reacts in a second; differencing
-    -- `stored` needs a multi-second window and visibly lagged behind the graph.
-    -- It is also less precise where it matters most: past 2^53 a double's ULP is
-    -- around a thousand EU, so a modest current through a nearly-full LSC drowns
-    -- in rounding noise.
-    --
-    -- Differencing still wins for sources that report no throughput (IC2
-    -- storage), which is what ratesUnavailable marks.
-    local measured = metrics.rate(tracker, now, 5)
-    if view.ratesUnavailable or not (view.euIn or view.euOut) then
-        view.net = measured or 0
+    -- Briefly the other way round, on the theory that GregTech's own counters
+    -- are faster and more precise. They are — but they only see what crossed a
+    -- hatch. An LSC in wireless mode drains to the network without EU OUT ever
+    -- registering it, and NET read as -1.9k EU/t (exactly the passive loss)
+    -- while the buffer shed 700M. Wrong and fast is worse than right and a
+    -- couple of seconds late, so the charge wins; the window is short instead.
+    local measured = metrics.rate(tracker, now, metrics.RATE_WINDOW)
+    if measured then
+        view.net = measured
     else
+        -- Only until enough samples exist — a fresh view, or one just reset.
         view.net = (view.euIn or 0) - (view.euOut or 0) - (view.passiveLoss or 0)
     end
 
-    -- Derive the net from in/out whenever both are known, rather than taking a
-    -- separately measured figure. The three columns are read side by side, and
-    -- a net that does not equal received minus sent makes the whole panel look
-    -- broken — even when each number is defensible on its own.
-    if view.avg5mIn and view.avg5mOut then
-        view.avg5m = view.avg5mIn - view.avg5mOut
-    else
-        view.avg5m = view.avg5m or metrics.average(tracker, now, 300)
-    end
-    if view.avg1hIn and view.avg1hOut then
-        view.avg1h = view.avg1hIn - view.avg1hOut
-    else
-        view.avg1h = view.avg1h or metrics.average(tracker, now, 3600)
-    end
+    -- Same rule over the long windows: the charge is the truth.
+    --
+    -- GregTech's own windowed averages are used only until enough history
+    -- exists, and they carry the same blind spot as EU IN/OUT — they count
+    -- hatch traffic, so `received - sent` can read as nothing while the buffer
+    -- visibly drains to a wireless network. When the two disagree, that gap is
+    -- itself the information: energy moved somewhere the counters do not watch.
+    view.avg5m = metrics.average(tracker, now, 300)
+        or (view.avg5mIn and view.avg5mOut and (view.avg5mIn - view.avg5mOut))
+        or view.avg5m
+    view.avg1h = metrics.average(tracker, now, 3600)
+        or (view.avg1hIn and view.avg1hOut and (view.avg1hIn - view.avg1hOut))
+        or view.avg1h
 
     -- How much energy actually moved over each window. In and out separately
     -- when the source tracks them, because a net figure alone cannot tell a busy
@@ -131,6 +128,20 @@ function monitor:buildView(id, base, now)
         net = metrics.energyOver(view.avg1h, 3600),
     }
     view.fillSeconds, view.fillDirection = metrics.projection(view.stored, view.capacity, view.net)
+
+    -- A buffer whose charge is visibly moving is not idle, whatever the
+    -- throughput counters say.
+    --
+    -- The adapters decide IDLE from EU IN/OUT, and those only count what crossed
+    -- a hatch: an LSC in wireless mode reported no flow at all while shedding
+    -- hundreds of millions of EU. Compared against the noise floor rather than
+    -- zero, so rounding on a nearly-full LSC cannot flicker the state.
+    if view.state == states.IDLE then
+        local floor = metrics.noiseFloor(view.stored, metrics.RATE_WINDOW)
+        if math.abs(view.net or 0) > math.max(floor, 1) then
+            view.state = states.ONLINE
+        end
+    end
 
     return view
 end
