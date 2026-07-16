@@ -61,7 +61,12 @@ end
 
 local clock = 0
 package.preload["computer"] = function()
-    return {uptime = function() return clock end}
+    return {
+        uptime = function() return clock end,
+        -- The default network key is derived from this, so it has to look like a
+        -- real UUID.
+        address = function() return "3a2f1c9e-0000-4000-8000-000000000042" end,
+    }
 end
 
 package.preload["filesystem"] = function()
@@ -835,9 +840,11 @@ srv:update(netMonitor)
 
 check("the server opens its port", serverModem.opened[4242] == true)
 check("the server broadcasts a poll", #serverModem.sent > 0)
-eq("the poll is tagged with the protocol", serverModem.sent[1][2], netTransport.PROTOCOL)
 eq("the poll goes out on the configured port", serverModem.sent[1][1], 4242)
-eq("the poll names the command", serverModem.sent[1][3], "poll")
+eq("the poll is tagged with the protocol", serverModem.sent[1][2], netTransport.PROTOCOL)
+-- Every message carries the network key, right behind the protocol tag.
+eq("the poll carries the network key", serverModem.sent[1][3], transport:key())
+eq("the poll names the command", serverModem.sent[1][4], "poll")
 
 -- The server must not re-poll before its interval elapses.
 local afterFirst = #serverModem.sent
@@ -901,7 +908,8 @@ check("the client answers a poll", #clientModem.sent > 0)
 local answer = clientModem.sent[#clientModem.sent]
 eq("the answer goes to the caller", answer[1], "server-address")
 eq("the answer is tagged with the protocol", answer[3], netTransport.PROTOCOL)
-eq("the answer names the command", answer[4], "status")
+eq("the answer carries the network key", answer[4], clientTransport:key())
+eq("the answer names the command", answer[5], "status")
 
 -- A client ignores commands meant for nobody in particular.
 local before = #clientModem.sent
@@ -976,6 +984,54 @@ eq("a client does not answer while the role is server",
     cli:onMessage(clientMonitor, "client-modem", "server-address", 4242, "poll"), false)
 eq("and sends nothing", #clientModem.sent, quietClient)
 
+-- Isolation between players -----------------------------------------------------
+--
+-- The scenario this exists for: a shared server where a neighbour also runs
+-- ARGUS. modem.broadcast reaches EVERY modem in range that opened the port, and
+-- the default port is the same for everyone — so without a key their server
+-- would poll our clients and our buffers would land on their screen. Both ways.
+
+clientConfig.network.role = "client"
+
+local mine = netTransport.new({network = {key = "MINE1234"}})
+local theirs = netTransport.new({network = {key = "THEM5678"}})
+
+check("a message from my own network is accepted",
+    mine:accepts(netTransport.PROTOCOL, "MINE1234"))
+check("a neighbour's ARGUS is rejected",
+    not mine:accepts(netTransport.PROTOCOL, "THEM5678"))
+check("another program on the same port is rejected",
+    not mine:accepts("someoneelse", "MINE1234"))
+check("a message with no key at all is rejected",
+    not mine:accepts(netTransport.PROTOCOL, nil))
+
+-- Two computers must not share a key by default, or the whole thing is moot the
+-- moment two players install it without touching the setting.
+eq("the default key comes from this computer's address",
+    netTransport.new({network = {}}):key(),
+    (require("computer").address():gsub("%-", ""):sub(1, 8):upper()))
+check("a configured key wins over the default", mine:key() == "MINE1234")
+
+-- End to end: a neighbour's poll must not extract our buffers.
+local neighbourConfig = {network = {role = "client", port = 4242, key = "MINE1234"}}
+local neighbourTransport = netTransport.new(neighbourConfig)
+check("a neighbour's key does not match ours",
+    not neighbourTransport:accepts(netTransport.PROTOCOL, "THEM5678"))
+
+-- And their status report must not be folded into our monitor.
+local intruderConfig = {
+    network = {role = "server", port = 4242, timeout = 15, key = "MINE1234"},
+    screen = {graphWindow = 600}, buffers = {},
+}
+local intruderTransport = netTransport.new(intruderConfig)
+local guarded = netServer.new(intruderConfig, intruderTransport)
+local guardedMonitor = monitorLib.new(intruderConfig)
+-- The routing layer is what enforces this, so prove the guard it relies on.
+check("a foreign status is filtered before it reaches the server",
+    not intruderTransport:accepts(netTransport.PROTOCOL, "THEM5678"))
+guardedMonitor:update()
+eq("no foreign clients appear", #guarded:list(), 0)
+
 -- A Linked Card carries the same protocol --------------------------------------
 
 fakeComponents["client-modem"] = nil
@@ -992,7 +1048,8 @@ tunnelClient:onMessage(clientMonitor, "link-card", "server-address", 0, "poll")
 check("a tunnel answers a poll", #link.sent > 0)
 -- send() on a Linked Card takes no address: it has exactly one peer.
 eq("the tunnel reply carries no address", link.sent[1][1], netTransport.PROTOCOL)
-eq("the tunnel reply names the command", link.sent[1][2], "status")
+eq("the tunnel reply carries the network key", link.sent[1][2], tunnelTransport:key())
+eq("the tunnel reply names the command", link.sent[1][3], "status")
 
 -- Installer manifest -----------------------------------------------------------
 --

@@ -452,6 +452,28 @@ function app:drawNetwork(width, rows, theme)
     graphics.text(x, row, "must match on every base", theme.muted, true)
     row = row + 1
 
+    -- The one setting a shared server makes non-optional.
+    label("Network key")
+    local key = self.server and self.server.transport:key() or "?"
+    x = 14 + widgets.button(14, row, key, theme, function()
+        local typed = widgets.prompt(2, rows - 2, 32, network.key or key, theme)
+        if typed then
+            typed = typed:gsub("%s+", ""):upper()
+            network.key = (typed ~= "") and typed or nil
+            self:notify("Key set — every base must use the same one")
+        end
+        self.dirty = true
+    end, nil, true) + 2
+    if network.role == "server" then
+        graphics.text(x, row, "copy this onto every client of yours", theme.muted, true)
+    else
+        graphics.text(x, row, "must match your server's key", theme.muted, true)
+    end
+    row = row + 1
+    graphics.text(14, row, "keeps other players' ARGUS out — a broadcast reaches everyone in range",
+        theme.muted, true)
+    row = row + 1
+
     label("This node")
     x = 14 + widgets.button(14, row, self.server and self.server.transport:nodeName() or "?",
         theme, function()

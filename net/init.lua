@@ -33,6 +33,35 @@ local RESCAN_INTERVAL = 5
 -- port is ignored rather than fed to serialization.
 net.PROTOCOL = "argus"
 
+-- ...and then with a network key, which separates YOUR bases from everyone
+-- else's on a shared server.
+--
+-- This is not optional politeness. modem.broadcast reaches every modem in range
+-- that has opened the port, so with a fixed default port and no key, a
+-- neighbour's ARGUS server would poll your clients, your clients would answer
+-- it, and their buffers would show up on your screen. Both directions.
+--
+-- Treat it as an SSID, not a password: it stops crossed wires, not a
+-- determined eavesdropper. Messages travel in the clear, and anyone in range
+-- who knows the key can join. For real isolation use a Linked Card — it is
+-- point-to-point and nothing else can receive it.
+local function keyFromAddress()
+    -- The computer's own UUID: unique per machine, stable across reboots, and
+    -- nothing a neighbouring base would ever land on by accident.
+    return (computer.address():gsub("%-", ""):sub(1, 8):upper())
+end
+
+function net:key()
+    local configured = self.config.network and self.config.network.key
+    if configured and configured ~= "" then return configured end
+    return keyFromAddress()
+end
+
+-- True when a message is ours: right protocol, right network.
+function net:accepts(protocol, key)
+    return protocol == net.PROTOCOL and key == self:key()
+end
+
 function net.new(config)
     return setmetatable({
         config = config,
@@ -84,13 +113,14 @@ end
 -- tunnel (whose single peer needs no address).
 function net:broadcast(port, ...)
     self:openPort(port)
+    local key = self:key()
     local sent = 0
     for _, card in pairs(self:cardList()) do
         local ok
         if card.kind == "tunnel" then
-            ok = util.call(card.proxy, "send", net.PROTOCOL, ...) ~= nil
+            ok = util.call(card.proxy, "send", net.PROTOCOL, key, ...) ~= nil
         else
-            ok = util.call(card.proxy, "broadcast", port, net.PROTOCOL, ...) ~= nil
+            ok = util.call(card.proxy, "broadcast", port, net.PROTOCOL, key, ...) ~= nil
         end
         if ok then sent = sent + 1 end
     end
@@ -103,10 +133,11 @@ function net:reply(localAddress, remoteAddress, port, ...)
     self:openPort(port)
     local card = self:cardList()[localAddress]
     if not card then return false end
+    local key = self:key()
     if card.kind == "tunnel" then
-        return util.call(card.proxy, "send", net.PROTOCOL, ...) ~= nil
+        return util.call(card.proxy, "send", net.PROTOCOL, key, ...) ~= nil
     end
-    return util.call(card.proxy, "send", remoteAddress, port, net.PROTOCOL, ...) ~= nil
+    return util.call(card.proxy, "send", remoteAddress, port, net.PROTOCOL, key, ...) ~= nil
 end
 
 -- Name this node answers to. The computer address is a poor label but beats an

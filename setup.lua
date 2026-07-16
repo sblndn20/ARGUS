@@ -1,6 +1,6 @@
 -- ARGUS installer.
 --
---   wget -f https://cdn.jsdelivr.net/gh/sblndn20/ARGUS@v2.1.0/setup.lua && setup
+--   wget -f https://cdn.jsdelivr.net/gh/sblndn20/ARGUS@v2.2.0/setup.lua && setup
 --
 -- Note the `&&`: without it, a failed wget leaves the PREVIOUS setup.lua in
 -- place and `setup` cheerfully runs that instead, installing whatever ref that
@@ -37,11 +37,11 @@ local shell = require("shell")
 -- Use --branch=<commit-sha> to install an exact revision (also immutable).
 -- Use --branch=main only to test unreleased code.
 local REPO = "sblndn20/ARGUS"
-local BRANCH = "v2.1.0"
+local BRANCH = "v2.2.0"
 
 -- What this installer expects to find on disk afterwards. Checked at the end so
 -- a stale mirror is reported instead of passing as a clean install.
-local EXPECTED_VERSION = "2.1.0"
+local EXPECTED_VERSION = "2.2.0"
 
 local INSTALL_DIR = "/home/ARGUS"
 
@@ -215,7 +215,7 @@ end
 if branch == "main" or branch == "master" then
     print("WARNING: '" .. branch .. "' is a branch. Mirrors cache branch refs per")
     print("file, so files may arrive from different commits. Prefer a tag or a")
-    print("commit SHA: setup --branch=v2.1.0")
+    print("commit SHA: setup --branch=v2.2.0")
 end
 
 local mirror = selectMirror()

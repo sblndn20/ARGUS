@@ -157,9 +157,12 @@ local function run()
             -- protocol serve both transports.
             local localAddress, remoteAddress = signal[2], signal[3]
             local port, distance = signal[4], signal[5]
-            -- The protocol tag keeps other programs sharing this port out.
-            if signal[6] == netTransport.PROTOCOL then
-                local command, payload = signal[7], signal[8]
+            -- Protocol tag keeps other programs off this port; network key keeps
+            -- other PLAYERS' ARGUS installs out. A wireless broadcast reaches
+            -- every modem in range that opened the port, so without the key a
+            -- neighbour's server would poll our clients and collect our buffers.
+            if transport:accepts(signal[6], signal[7]) then
+                local command, payload = signal[8], signal[9]
                 server:onMessage(monitor, localAddress, remoteAddress, port, distance,
                     command, payload)
                 client:onMessage(monitor, localAddress, remoteAddress, port, command)

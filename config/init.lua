@@ -47,6 +47,14 @@ local function defaults()
         network = {
             role = "standalone", -- standalone | server | client
             port = 42069,
+            -- Which bases are YOURS. A shared server means other players may be
+            -- running ARGUS too, and a wireless broadcast reaches every modem in
+            -- range that opened the port — so without this their server would
+            -- poll your clients and their buffers would appear on your screen.
+            -- Defaults to this computer's address (unique, stable); copy the
+            -- server's key onto each client. See net/init.lua for why this is an
+            -- SSID and not a password.
+            key = nil,
             -- Shown on the server's Network page. Defaults to the computer's
             -- own address when unset.
             name = nil,
