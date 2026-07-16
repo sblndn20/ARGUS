@@ -61,12 +61,12 @@ Computronics `1.9.3-GTNH`).
 В шелле OpenOS:
 
 ```shell
-wget -f https://raw.githubusercontent.com/<ВАШ_ЮЗЕР>/<ВАШ_РЕПО>/main/setup.lua && setup
+wget -f https://raw.githubusercontent.com/sblndn20/monitoring-app/main/setup.lua && setup
 ```
 
 Установщик скачает файлы в `/home/EMON` и предложит включить автозапуск.
 
-Если репозиторий свой, укажите его явно:
+Если ставите из форка, укажите его явно:
 
 ```shell
 setup --repo=user/repo --branch=main

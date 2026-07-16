@@ -1,6 +1,6 @@
 -- EMON installer.
 --
---   wget -f https://raw.githubusercontent.com/<user>/<repo>/main/setup.lua && setup
+--   wget -f https://raw.githubusercontent.com/sblndn20/monitoring-app/main/setup.lua && setup
 --
 -- Files are fetched individually from raw.githubusercontent.com rather than as
 -- a release tarball. NIDAS pulls a third-party tar binary into /bin first
@@ -15,8 +15,8 @@ local component = require("component")
 local filesystem = require("filesystem")
 local shell = require("shell")
 
--- Point this at your fork.
-local REPO = "S4mpsa-fork/EMON"
+-- Override with `setup --repo=user/repo --branch=name` when installing a fork.
+local REPO = "sblndn20/monitoring-app"
 local BRANCH = "main"
 
 local INSTALL_DIR = "/home/EMON"
