@@ -46,6 +46,7 @@ local ar = require("lib.graphics.ar")
 local graphics = require("lib.graphics.graphics")
 
 local configuration = require("config")
+local craftLib = require("core.craft")
 local monitorLib = require("core.monitor")
 local sources = require("core.sources")
 
@@ -103,6 +104,12 @@ local function run()
     local monitor = monitorLib.new(config)
     local hud = arHud.new(config)
 
+    -- nil when crafting is switched off, and that nil is the off switch all the
+    -- way down: the AR card and the Crafting page both treat "no craft monitor"
+    -- as "do not exist" rather than as an error state.
+    local craftMonitor = (config.craft and config.craft.enabled ~= false)
+        and craftLib.new(config) or nil
+
     -- Both roles are constructed regardless of the configured one: each is inert
     -- unless config.network.role names it, and building both means switching
     -- role in the UI takes effect without a restart.
@@ -110,13 +117,14 @@ local function run()
     local server = netServer.new(config, transport)
     local client = netClient.new(config, transport)
 
-    local application = app.new(monitor, config, hud, server)
+    local application = app.new(monitor, config, hud, server, craftMonitor)
 
     if not hasScreen then
         config.screen.enabled = false
     end
 
     local lastPoll = -math.huge
+    local lastCraftPoll = -math.huge
     local frame = 0
 
     while application.running do
@@ -137,8 +145,17 @@ local function run()
             lastPoll = now
         end
 
+        -- Crafting keeps its own, much slower schedule: one poll costs getCpus()
+        -- plus up to four calls per busy CPU, and a job changes on the scale of
+        -- seconds. Tying it to the energy rate would multiply ME network calls
+        -- for readings that cannot have changed.
+        if craftMonitor and (now - lastCraftPoll) >= (config.craft.pollInterval or 2) then
+            craftMonitor:update()
+            lastCraftPoll = now
+        end
+
         -- Cheap: mutates glasses objects that already exist.
-        hud:update(monitor)
+        hud:update(monitor, craftMonitor)
 
         -- A full screen redraw is not cheap, so it runs at half the animation
         -- rate — still smooth, at a fraction of the GPU calls.

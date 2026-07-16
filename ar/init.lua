@@ -30,6 +30,7 @@ local monitorLib = require("core.monitor")
 local util = require("core.util")
 
 local arPanel = require("ar.panel")
+local arCraft = require("ar.craft")
 
 local hud = {}
 hud.__index = hud
@@ -43,6 +44,10 @@ function hud.new(config)
     return setmetatable({
         config = config,
         panels = {},
+        -- The crafting card, kept in its own table rather than as a field on the
+        -- energy panel: the two are independent cards with their own placement,
+        -- their own rebuild triggers, and either can exist without the other.
+        craftPanels = {},
         cleared = {},
         addresses = {},
         addressesAt = nil,
@@ -87,6 +92,18 @@ local function signature(settings, resolution)
     }, "|")
 end
 
+-- The crafting card's own rebuild trigger. `rows` is in here because row objects
+-- are built once at construction and never grow — changing the count means new
+-- objects. `stalledOnly` is NOT: it filters what the existing rows show, so it
+-- applies live without touching the glasses.
+local function craftSignature(settings, resolution)
+    return table.concat({
+        tostring(settings.enabled), tostring(settings.rows),
+        tostring(settings.anchor), tostring(settings.offsetX), tostring(settings.offsetY),
+        tostring(resolution[1]), tostring(resolution[2]),
+    }, "|")
+end
+
 -- Remove leftovers from a previous run before drawing on a pair of glasses for
 -- the first time. Objects from a crashed process cannot be removed individually
 -- (their handles are gone), so this is the only way to reclaim them. Done once
@@ -106,8 +123,16 @@ function hud:drop(address)
     self.panels[address] = nil
 end
 
+function hud:dropCraft(address)
+    local panel = self.craftPanels[address]
+    if not panel then return end
+    pcall(function() panel.instance:remove() end)
+    self.craftPanels[address] = nil
+end
+
 function hud:removeAll()
     for address in pairs(self.panels) do self:drop(address) end
+    for address in pairs(self.craftPanels) do self:dropCraft(address) end
 end
 
 -- Pick the view for one pair of glasses.
@@ -134,7 +159,45 @@ function hud:selectView(address, settings, monitor, now)
     return views[panel.cycleIndex]
 end
 
-function hud:update(monitor)
+-- Build or tear down the crafting card for one pair of glasses.
+--
+-- `craftMonitor` is optional: crafting can be switched off in the config, or the
+-- app can be running on a machine with no ME network at all. Either way the card
+-- simply does not exist, and the energy card is unaffected.
+function hud:updateCraft(address, settings, resolution, craftMonitor)
+    local cardSettings = settings.craft or {}
+    local current = self.craftPanels[address]
+    local wanted = craftSignature(cardSettings, resolution)
+
+    if current and current.signature ~= wanted then
+        self:dropCraft(address)
+        current = nil
+    end
+
+    local wantCard = cardSettings.enabled and craftMonitor ~= nil
+    if not wantCard then
+        if current then self:dropCraft(address) end
+        return
+    end
+
+    if not current then
+        local ok, proxy = pcall(component.proxy, address)
+        if not (ok and proxy) then return end
+        self:clearOnce(address, proxy)
+        local built, instance =
+            pcall(arCraft.new, proxy, cardSettings, self.config.theme, resolution)
+        if not built then return end
+        self.craftPanels[address] = {instance = instance, proxy = proxy, signature = wanted}
+        current = self.craftPanels[address]
+    end
+
+    -- Glasses unplugged mid-frame: forget the card and let the next pass rebuild
+    -- it if they come back.
+    local ok = pcall(function() current.instance:update(craftMonitor, cardSettings) end)
+    if not ok then self:dropCraft(address) end
+end
+
+function hud:update(monitor, craftMonitor)
     local now = computer.uptime()
     local seen = {}
 
@@ -144,6 +207,10 @@ function hud:update(monitor)
         local resolution = self:resolution(address, settings)
         local current = self.panels[address]
         local wanted = signature(settings, resolution)
+
+        -- Independent of settings.enabled below: that switch owns the energy
+        -- card only, so a player can wear the crafting card on its own.
+        self:updateCraft(address, settings, resolution, craftMonitor)
 
         if current and current.signature ~= wanted then
             self:drop(address)
@@ -185,6 +252,9 @@ function hud:update(monitor)
     -- Glasses that vanished from the component list.
     for address in pairs(self.panels) do
         if not seen[address] then self:drop(address) end
+    end
+    for address in pairs(self.craftPanels) do
+        if not seen[address] then self:dropCraft(address) end
     end
 end
 
@@ -251,10 +321,44 @@ function hud:applyAction(address, action, monitor)
     return nil
 end
 
--- Returns true when the click landed on the card.
+-- Act on a click that landed on the crafting card.
+--
+-- These do not touch the energy monitor at all, which is why they are handled
+-- apart from applyAction: paging is a property of the card in front of this one
+-- player, while the filter is a saved per-glasses setting.
+function hud:applyCraftAction(address, action)
+    local panel = self.craftPanels[address]
+    if not panel then return false end
+
+    if action == "craft:prev" then
+        return panel.instance:scroll(-1)
+    elseif action == "craft:next" then
+        return panel.instance:scroll(1)
+    elseif action == "craft:filter" then
+        local settings = configuration.glassesFor(self.config, address).craft
+        settings.stalledOnly = not settings.stalledOnly
+        -- Rows that were scrolled away may not exist under the new filter.
+        panel.instance.page = 0
+        return true
+    end
+    return false
+end
+
+-- Returns true when the click landed on either card.
+--
+-- Both cards are tested because they are separate objects at separate anchors:
+-- there is no single panel under the cursor to ask. The crafting card goes
+-- first only for determinism if a player overlaps the two.
 function hud:onClick(user, x, y, monitor)
     local address = self:glassesFor(user)
     if not address then return false end
+
+    local craftPanel = self.craftPanels[address]
+    if craftPanel then
+        local action = craftPanel.instance:hitTest(x, y)
+        if action then return self:applyCraftAction(address, action) end
+    end
+
     local panel = self.panels[address]
     if not panel then return false end
 
@@ -264,15 +368,38 @@ function hud:onClick(user, x, y, monitor)
     return true
 end
 
--- Hotkeys inside the free-cursor overlay: ‹ / › arrows, digits pick the Nth
--- source, `c` toggles cycling. LWJGL reports 203/205 for the arrow keys, whose
--- `character` is 0 — so both the character and the key code are inspected.
+-- Hotkeys inside the free-cursor overlay.
+--
+-- Energy card:   ← / → switch source, 1-9 pick the Nth, `c` toggles cycling.
+-- Crafting card: [ / ] page the list, `f` shows stalled jobs only.
+--
+-- The crafting keys are separate rather than shared through a focus mode: the
+-- energy bindings already exist in players' hands, and a focus rule would change
+-- what ← does depending on invisible state. Distinct keys cost two letters and
+-- nothing else.
+--
+-- LWJGL reports 203/205 for the arrow keys, whose `character` is 0 — so both the
+-- character and the key code are inspected.
 function hud:onKey(user, character, key, monitor)
     local address = self:glassesFor(user)
-    if not address or not self.panels[address] then return false end
+    if not address then return false end
+    -- Either card being present is enough: the crafting card can be worn alone.
+    if not (self.panels[address] or self.craftPanels[address]) then return false end
 
     local settings = configuration.glassesFor(self.config, address)
     character = tonumber(character) or 0
+
+    if character == 91 then -- '['
+        return self:applyCraftAction(address, "craft:prev")
+    elseif character == 93 then -- ']'
+        return self:applyCraftAction(address, "craft:next")
+    elseif character == 102 then -- 'f'
+        return self:applyCraftAction(address, "craft:filter")
+    end
+
+    -- Everything below drives the energy card, so ignore it when only the
+    -- crafting card is up rather than silently mutating a hidden panel's source.
+    if not self.panels[address] then return false end
 
     if key == 203 then
         self:step(settings, monitor, -1) return true

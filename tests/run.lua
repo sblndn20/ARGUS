@@ -1299,6 +1299,325 @@ if initSource then
     end
 end
 
+-- craft ------------------------------------------------------------------------
+--
+-- The AE2 crafting API is a GTNH addition (NetworkControl.scala in the 1.11.20-GTNH
+-- fork); upstream OpenComputers has nothing like it. These fixtures reproduce its
+-- exact shapes: getCpus() hands back {name, storage, coprocessors, busy, cpu},
+-- the item lists come from convert(), which returns null for a stack it cannot
+-- describe — and a null lands in Lua as a HOLE in the array.
+--
+-- Stalls and ordering are the parts worth testing hardest, because neither is
+-- read from the API: AE2 exposes no isStalled() and no job order, so both are
+-- derived here and a mistake would be a confidently wrong number in the HUD.
+
+local craftLib = require("core.craft")
+
+local function aeItem(name, label, size)
+    return {name = name, label = label, size = size, damage = 0, isCraftable = false}
+end
+
+-- One CPU. `spec` is mutated between polls to simulate a job progressing.
+local function fakeCpu(spec)
+    local cpu = {}
+    cpu.isActive = method(function() return spec.busy end)
+    cpu.isBusy = method(function() return spec.busy end)
+    cpu.activeItems = method(function() return spec.active or {} end)
+    cpu.pendingItems = method(function() return spec.pending or {} end)
+    cpu.storedItems = method(function() return spec.stored or {} end)
+    cpu.finalOutput = method(function()
+        if spec.output then return spec.output end
+        -- The real driver returns (null, reason). "No crafting monitor" is the
+        -- one that means "add a block", not "nothing is running".
+        return nil, spec.outputError or "Nothing is crafted"
+    end)
+    return cpu
+end
+
+-- A whole me_controller proxy. Built directly rather than through proxy() above,
+-- which is a GregTech sensor fixture: an ME controller has no sensor text, and
+-- getCpus is the only method that matters here.
+local function fakeController(specs)
+    local controller = {address = "me-fixture", type = "me_controller"}
+    controller.getCpus = method(function()
+        local out = {}
+        for i, spec in ipairs(specs) do
+            out[i] = {
+                name = spec.name,
+                storage = spec.storage or 1024,
+                coprocessors = spec.coprocessors or 0,
+                busy = spec.busy,
+                cpu = fakeCpu(spec),
+            }
+        end
+        return out
+    end)
+    return controller
+end
+
+do
+    local busySpec = {
+        name = "Assembly",
+        busy = true,
+        output = {name = "gt:ingot", label = "Titanium Ingot", size = 64},
+        active = {aeItem("gt:rutile", "Rutile", 12), aeItem("gt:dust", "Magnesium Dust", 30)},
+        -- A hole, exactly as convert() returning null produces. ipairs() would
+        -- stop at index 1 here and silently under-report the pending work.
+        pending = {[1] = aeItem("gt:ticl4", "Titanium Tetrachloride", 4),
+                   [3] = aeItem("gt:salt", "Salt", 9)},
+        stored = {aeItem("gt:coke", "Coke", 5)},
+    }
+    local idleSpec = {name = "Small", busy = false}
+
+    fakeComponents["me-1"] = fakeController({busySpec, idleSpec})
+    fakeTypes["me-1"] = "me_controller"
+
+    local craftConfig = {craft = {stallSeconds = 120, emptyStallSeconds = 15}}
+    local craftMonitor = craftLib.new(craftConfig)
+
+    clock = 5000
+    craftMonitor:update()
+
+    local summary = craftMonitor:summary()
+    eq("craft counts every CPU", summary.total, 2)
+    eq("craft counts only busy CPUs as busy", summary.busy, 1)
+    eq("craft reports no stall on the first poll", summary.stalled, 0)
+
+    -- The driver indexes CPUs from 0 and the Cpu value keeps that index, so the
+    -- ids must match what a script calling getCpus() directly would see.
+    local job = craftMonitor:get("me-1#0")
+    check("craft ids the first CPU as #0", job ~= nil)
+    eq("craft reads the CPU name", job.cpuName, "Assembly")
+    eq("craft reads the ordered item", job.output and job.output.label, "Titanium Ingot")
+    eq("craft reads the ordered amount", job.output and job.output.size, 64)
+
+    -- Sorted by size descending: pairs() has no order, so an unsorted list would
+    -- reshuffle between polls and make the HUD row flicker.
+    eq("craft sorts active items by size", job.active[1].label, "Magnesium Dust")
+    eq("craft surfaces the largest active stack as `now`", job.now.label, "Magnesium Dust")
+
+    eq("craft skips holes in the item list", #job.pending, 2)
+    eq("craft surfaces the largest pending stack as `next`", job.next.label, "Salt")
+
+    eq("craft reads stored intermediates", #job.stored, 1)
+    eq("craft marks a working CPU as CRAFTING", job.state, craftLib.CRAFTING)
+
+    local idle = craftMonitor:get("me-1#1")
+    eq("craft marks a free CPU as IDLE", idle.state, craftLib.IDLE)
+    -- An idle CPU is not read at all: four calls per CPU is the cost this saves
+    -- on a network where most sit free.
+    eq("craft does not read items off an idle CPU", #idle.active, 0)
+
+    -- Stall: nothing changes -------------------------------------------------
+    clock = 5000 + 119
+    craftMonitor:update()
+    eq("craft holds off on a stall below the threshold",
+        craftMonitor:get("me-1#0").state, craftLib.CRAFTING)
+
+    clock = 5000 + 121
+    craftMonitor:update()
+    job = craftMonitor:get("me-1#0")
+    eq("craft flags a frozen job as STALLED", job.state, craftLib.STALLED)
+    eq("craft says why it stalled", job.stallReason, "no progress")
+    check("craft reports how long it has been frozen", (job.stalledFor or 0) >= 121)
+    eq("craft counts the stall in the summary", craftMonitor:summary().stalled, 1)
+
+    -- Progress clears the stall.
+    busySpec.active = {aeItem("gt:rutile", "Rutile", 6)}
+    clock = 5000 + 130
+    craftMonitor:update()
+    eq("craft clears the stall once a reading changes",
+        craftMonitor:get("me-1#0").state, craftLib.CRAFTING)
+
+    -- Stall: nothing dispatched ----------------------------------------------
+    -- Busy with work pending but no machine running any of it. This is the
+    -- strong signal, so it fires on the short threshold, not the long one.
+    busySpec.active = {}
+    busySpec.pending = {aeItem("gt:ticl4", "Titanium Tetrachloride", 4)}
+    clock = 6000
+    craftMonitor:update()
+    eq("craft does not call an empty machine list a stall immediately",
+        craftMonitor:get("me-1#0").state, craftLib.CRAFTING)
+
+    clock = 6000 + 16
+    craftMonitor:update()
+    job = craftMonitor:get("me-1#0")
+    eq("craft stalls fast when nothing is dispatched", job.state, craftLib.STALLED)
+    eq("craft distinguishes a stuck job from a slow one", job.stallReason,
+        "nothing dispatched to any machine")
+    eq("craft still names what should have run next", job.next.label,
+        "Titanium Tetrachloride")
+
+    -- busy() ordering ---------------------------------------------------------
+    idleSpec.busy = true
+    idleSpec.active = {aeItem("gt:plate", "Steel Plate", 2)}
+    clock = 6000 + 17
+    craftMonitor:update()
+    local busyJobs = craftMonitor:busy()
+    eq("craft lists every busy CPU", #busyJobs, 2)
+    -- The card has room for a few rows; the stalled job is the one worth them.
+    eq("craft puts the stalled job first", busyJobs[1].id, "me-1#0")
+
+    -- A finished job must not leave its stall timer behind for the next one.
+    busySpec.busy = false
+    clock = 7000
+    craftMonitor:update()
+    eq("craft forgets a finished job", craftMonitor:get("me-1#0").state, craftLib.IDLE)
+    busySpec.busy = true
+    busySpec.active = {}
+    busySpec.pending = {aeItem("gt:ticl4", "Titanium Tetrachloride", 4)}
+    clock = 7001
+    craftMonitor:update()
+    eq("craft starts the next job's stall clock from zero",
+        craftMonitor:get("me-1#0").state, craftLib.CRAFTING)
+
+    fakeComponents["me-1"] = nil
+    fakeTypes["me-1"] = nil
+end
+
+-- The Crafting Monitor requirement.
+--
+-- finalOutput() is read off a TileCraftingMonitorTile inside the CPU cluster, so
+-- a CPU assembled without one reports nothing and there is NO software fallback.
+-- The UI leans on this error text to tell the player to add a block, rather than
+-- showing "?" — so the text reaching it is worth a test.
+do
+    local spec = {
+        name = "Bare",
+        busy = true,
+        outputError = "No crafting monitor",
+        active = {aeItem("gt:rutile", "Rutile", 1)},
+    }
+    fakeComponents["me-2"] = fakeController({spec})
+    fakeTypes["me-2"] = "me_controller"
+
+    local craftMonitor = craftLib.new({craft = {}})
+    clock = 8000
+    craftMonitor:update()
+
+    local job = craftMonitor:get("me-2#0")
+    check("craft reports no output without a Crafting Monitor", job.output == nil)
+    eq("craft keeps the driver's reason", job.outputError, "No crafting monitor")
+    -- The job itself is still perfectly readable; only its final output is not.
+    eq("craft still tracks a chain without a Crafting Monitor", job.now.label, "Rutile")
+
+    fakeComponents["me-2"] = nil
+    fakeTypes["me-2"] = nil
+end
+
+-- No ME network at all: the card and the page both key off this, and it must be
+-- an ordinary state rather than an error that takes the app down.
+do
+    local craftMonitor = craftLib.new({craft = {}})
+    craftMonitor:update()
+    local summary = craftMonitor:summary()
+    eq("craft reports no CPUs without an ME component", summary.total, 0)
+    check("craft explains why it found nothing", summary.error ~= nil)
+    eq("craft lists nothing to draw", #craftMonitor:list(), 0)
+end
+
+-- AR crafting card -------------------------------------------------------------
+--
+-- The second card on the same glasses. Two things matter beyond layout: the
+-- cards must stay independent (either can be worn alone), and objects must be
+-- created once and mutated — OCGlasses has no frame boundary, so a card that
+-- rebuilt per poll would leak objects into the glasses until they choke.
+
+do
+    local spec = {
+        name = "Assembly",
+        busy = true,
+        output = {name = "gt:ingot", label = "Titanium Ingot", size = 64},
+        active = {aeItem("gt:rutile", "Rutile", 12)},
+        pending = {aeItem("gt:salt", "Salt", 9)},
+        stored = {},
+    }
+    fakeComponents["me-3"] = fakeController({spec})
+    fakeTypes["me-3"] = "me_controller"
+
+    local craftMonitor = craftLib.new({craft = {}})
+    clock = 9000
+    craftMonitor:update()
+
+    local cardConfig = configuration.defaults()
+    cardConfig.buffers = {}
+    local cardHud = arHud.new(cardConfig)
+
+    local settings = configuration.glassesFor(cardConfig, "glasses-1")
+    settings.enabled = false          -- energy card off, to prove independence
+    settings.craft.enabled = true
+    settings.craft.anchor = "top-left"
+    settings.craft.rows = 3
+
+    cardHud:update(monitor, craftMonitor)
+    check("hud builds the crafting card", cardHud.craftPanels["glasses-1"] ~= nil)
+    eq("the crafting card does not need the energy card", cardHud.panels["glasses-1"], nil)
+
+    local glasses = fakeComponents["glasses-1"]
+    local objectCount = countObjects(glasses)
+    cardHud:update(monitor, craftMonitor)
+    cardHud:update(monitor, craftMonitor)
+    eq("the crafting card mutates its objects instead of leaking new ones",
+        countObjects(glasses), objectCount)
+
+    -- Hit boxes ---------------------------------------------------------------
+    local card = cardHud.craftPanels["glasses-1"].instance
+    eq("the header toggles the stalled filter", card:hitTest(card.x + 20, card.y + 5),
+        "craft:filter")
+    eq("‹ maps to a page back", card:hitTest(card.x + card.width - 24, card.y + 5),
+        "craft:prev")
+    eq("› maps to a page forward", card:hitTest(card.x + card.width - 12, card.y + 5),
+        "craft:next")
+    eq("a click below the crafting card misses", card:hitTest(card.x + 20, card.y + 500), nil)
+
+    local handled = cardHud:handleSignal(monitor, "hud_click", "Tester",
+        card.x + 20, card.y + 5, 0)
+    check("a click on the header is handled", handled)
+    check("the click toggled the stalled filter", settings.craft.stalledOnly)
+
+    -- Keys --------------------------------------------------------------------
+    -- Distinct from the energy bindings on purpose: ← → keep switching source,
+    -- so a player's existing habits are untouched.
+    cardHud:handleSignal(monitor, "hud_keyboard", "Tester", 102, 0) -- 'f'
+    check("F toggles the stalled filter back", not settings.craft.stalledOnly)
+
+    check("] pages the crafting card forward",
+        cardHud:handleSignal(monitor, "hud_keyboard", "Tester", 93, 0))
+    eq("paging moved the card", card.page, 1)
+    check("[ pages the crafting card back",
+        cardHud:handleSignal(monitor, "hud_keyboard", "Tester", 91, 0))
+    eq("paging moved the card back", card.page, 0)
+    -- Nothing to page to, so the card must not pretend it handled the key.
+    check("[ at the start is not handled",
+        not cardHud:handleSignal(monitor, "hud_keyboard", "Tester", 91, 0))
+
+    -- With no energy card up, the energy keys must not silently mutate a hidden
+    -- panel's source.
+    check("← is ignored while only the crafting card is worn",
+        not cardHud:handleSignal(monitor, "hud_keyboard", "Tester", 0, 203))
+
+    -- A page left pointing past the end would show an empty card while work runs.
+    card.page = 5
+    cardHud:update(monitor, craftMonitor)
+    eq("the card clamps a page that ran off the end", card.page, 0)
+
+    settings.craft.enabled = false
+    cardHud:update(monitor, craftMonitor)
+    eq("hud drops the crafting card when disabled", cardHud.craftPanels["glasses-1"], nil)
+
+    -- Crafting switched off in the config: nil craft monitor, no card, no error.
+    settings.craft.enabled = true
+    cardHud:update(monitor, nil)
+    eq("hud draws no crafting card without a craft monitor",
+        cardHud.craftPanels["glasses-1"], nil)
+
+    cardHud:removeAll()
+    eq("removeAll clears every crafting object from the glasses", countObjects(glasses), 0)
+
+    fakeComponents["me-3"] = nil
+    fakeTypes["me-3"] = nil
+end
+
 -- Installer manifest -----------------------------------------------------------
 --
 -- setup.lua lists every file to download. A module that exists in the repo but

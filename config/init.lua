@@ -37,6 +37,21 @@ local function defaults()
             pollInterval = 0.4,
         },
 
+        -- ME crafting monitor.
+        craft = {
+            enabled = true,
+            -- Much slower than the energy poll on purpose: a read costs
+            -- getCpus() plus up to four calls per BUSY CPU, and a crafting job
+            -- changes on the scale of seconds, not tenths of one.
+            pollInterval = 2,
+            -- Busy but nothing changed for this long -> STALLED. Generous
+            -- because a single GregTech recipe legitimately runs for minutes.
+            stallSeconds = 120,
+            -- Busy, work pending, but nothing in any machine. Not slow — stuck,
+            -- so this fires far sooner. See core/craft.lua.
+            emptyStallSeconds = 15,
+        },
+
         -- Distributed mode.
         --
         -- OpenComputers cannot join component networks wirelessly — that is a
@@ -98,6 +113,32 @@ end
 
 config.defaults = defaults
 
+-- The crafting card is a second, independent card on the same glasses, so it
+-- carries its own placement rather than hanging off the energy card's.
+function config.craftCardDefaults()
+    return {
+        -- Off by default: the card is only useful on a network with autocrafting,
+        -- and an empty card in the corner of every player's view is worse than
+        -- one they had to switch on.
+        enabled = false,
+
+        -- top-right by default, so it does not land on the energy card's
+        -- top-left. Potion effects live here, which is the lesser conflict.
+        anchor = "top-right",
+        offsetX = 0,
+        offsetY = 0,
+
+        -- Busy CPUs to list. Beyond a handful the card stops being a HUD and
+        -- starts being a wall; the Crafting page on the monitor is where the
+        -- full list belongs.
+        rows = 4,
+
+        -- Show only what needs attention. On a big network most CPUs are busy
+        -- with something routine, and the stalled one is the reason to look.
+        stalledOnly = false,
+    }
+end
+
 function config.glassesDefaults()
     return {
         enabled = true,
@@ -105,6 +146,9 @@ function config.glassesDefaults()
         cycle = false,
         cycleInterval = 8,
         compact = false,
+
+        -- The crafting card, sharing these glasses with the energy card.
+        craft = config.craftCardDefaults(),
 
         -- Take the viewport from the glasses_on signal, which reports the
         -- player's real ScaledResolution. That is the space hud_click reports
@@ -189,8 +233,15 @@ function config.installedRef()
 end
 
 function config.glassesFor(data, address)
-    data.glasses[address] = util.defaults(data.glasses[address], config.glassesDefaults())
-    return data.glasses[address]
+    local settings = util.defaults(data.glasses[address], config.glassesDefaults())
+    -- util.defaults is shallow, so a `glasses` entry written before the crafting
+    -- card existed keeps its own table for every key it already has — and would
+    -- never gain new nested fields. merge() cannot help either: it skips the
+    -- `glasses` subtree entirely, because entries there are keyed by address and
+    -- there are no defaults to walk. So this level is merged by hand.
+    settings.craft = util.defaults(settings.craft, config.craftCardDefaults())
+    data.glasses[address] = settings
+    return settings
 end
 
 -- Merge freshly discovered components into the buffer list, keeping any

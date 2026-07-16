@@ -13,7 +13,10 @@ local palette = require("lib.graphics.colors")
 local text = require("lib.utils.text")
 local time = require("lib.utils.time")
 
+local time = require("lib.utils.time")
+
 local configuration = require("config")
+local craftLib = require("core.craft")
 local monitorLib = require("core.monitor")
 local sources = require("core.sources")
 
@@ -23,6 +26,7 @@ local widgets = require("ui.widgets")
 
 -- For the anchor list: ar.panel owns the HUD layout, so it owns the corners.
 local arPanel = require("ar.panel")
+local arCraft = require("ar.craft")
 
 local app = {}
 app.__index = app
@@ -43,15 +47,18 @@ local function buildLabel()
     return ref and (label .. " @" .. ref) or label
 end
 
--- `hud` and `server` are optional: the Glasses page uses hud to report the
--- viewport detected from glasses_on, and the Network page uses server to list
--- connected clients. Neither is required for the app to run.
-function app.new(monitor, config, hud, server)
+-- `hud`, `server` and `craft` are optional: the Glasses page uses hud to report
+-- the viewport detected from glasses_on, the Network page uses server to list
+-- connected clients, and the Crafting page uses craft to list ME CPUs. None is
+-- required for the app to run — a nil craft monitor means crafting is switched
+-- off, and the page says so rather than failing.
+function app.new(monitor, config, hud, server, craft)
     return setmetatable({
         monitor = monitor,
         config = config,
         hud = hud,
         server = server,
+        craft = craft,
         page = "dashboard",
         running = true,
         dirty = true,
@@ -220,6 +227,9 @@ end
 local NUDGE = 4
 local SCALES = {1, 2, 3, 4}
 local INTERVALS = {4, 8, 15, 30}
+-- Rows the crafting card offers. Capped at 8 to match ar/craft.lua, which
+-- clamps there for the same reason: past that the card covers the game.
+local CRAFT_ROWS = {2, 3, 4, 5, 6, 8}
 
 function app:nextSource(settings)
     local views = self.monitor:list()
@@ -389,14 +399,75 @@ function app:drawGlasses(width, rows, theme)
     end
     row = row + 2
 
+    -- Crafting card ----------------------------------------------------------
+    -- A second card on the same glasses, with its own placement. It is deliberately
+    -- independent of "Display" above: that switch owns the energy card, so these
+    -- glasses can wear either card, both, or neither.
+    local craftCard = settings.craft
+
+    label("Craft card")
+    x = 14
+    x = x + widgets.button(x, row, craftCard.enabled and "on" or "off", theme, function()
+        craftCard.enabled = not craftCard.enabled
+        self.dirty = true
+    end, nil, craftCard.enabled) + 2
+
+    if not craftCard.enabled then
+        graphics.text(x, row, self.craft and "← shows ME crafting jobs and stalls"
+            or "← crafting monitoring is off in the config", theme.muted, true)
+        row = row + 2
+    else
+        x = x + widgets.button(x, row, craftCard.anchor, theme, function()
+            craftCard.anchor = cycleValue(arCraft.ANCHORS, craftCard.anchor)
+            self.dirty = true
+        end, nil, true) + 1
+
+        local function nudgeCraft(dx, dy)
+            return function()
+                craftCard.offsetX = (craftCard.offsetX or 0) + dx
+                craftCard.offsetY = (craftCard.offsetY or 0) + dy
+                self.dirty = true
+            end
+        end
+        x = x + widgets.button(x, row, "←", theme, nudgeCraft(-NUDGE, 0), nil, true) + 1
+        x = x + widgets.button(x, row, "→", theme, nudgeCraft(NUDGE, 0), nil, true) + 1
+        x = x + widgets.button(x, row, "↑", theme, nudgeCraft(0, -NUDGE), nil, true) + 1
+        x = x + widgets.button(x, row, "↓", theme, nudgeCraft(0, NUDGE), nil, true) + 2
+
+        -- Row count is capped where the card stops being a HUD and starts being
+        -- a wall; the Crafting page is where the full list belongs.
+        x = x + widgets.button(x, row, "rows " .. (craftCard.rows or 4), theme, function()
+            craftCard.rows = cycleValue(CRAFT_ROWS, craftCard.rows)
+            self.dirty = true
+        end, nil, false) + 1
+
+        x = x + widgets.button(x, row, "stalled only", theme, function()
+            craftCard.stalledOnly = not craftCard.stalledOnly
+            self.dirty = true
+        end, nil, craftCard.stalledOnly) + 2
+
+        graphics.text(x, row, string.format("at %d,%d", craftCard.offsetX or 0,
+            craftCard.offsetY or 0), theme.muted, true)
+        row = row + 1
+
+        if not self.craft then
+            graphics.text(14, row, "Crafting monitoring is off in the config — the card stays hidden.",
+                palette.amber, true)
+            row = row + 1
+        end
+        row = row + 1
+    end
+
     -- The category shows up as "OC Glasses"; openGlasses is only the lang key.
     -- Both bindings ship unbound, which is the single most common reason the HUD
     -- looks unresponsive.
     graphics.text(2, row, "In-game: Controls → \"OC Glasses\" → bind \"Free Cursor (Toggle)\".",
         theme.muted, true)
-    graphics.text(2, row + 1, "It is UNBOUND by default. Then: ← → switch, 1-9 pick, C cycles.",
+    graphics.text(2, row + 1, "It is UNBOUND by default. Energy: ← → switch, 1-9 pick, C cycles.",
         theme.muted, true)
-    row = row + 3
+    graphics.text(2, row + 2, "Crafting card: [ ] page the list, F shows stalled jobs only.",
+        theme.muted, true)
+    row = row + 4
     graphics.text(2, row, "Changes apply instantly. Press Save to keep them.", theme.muted, true)
 end
 
@@ -572,6 +643,170 @@ end
 
 -- Frame ---------------------------------------------------------------------
 
+-- Crafting -------------------------------------------------------------------
+
+local CRAFT_STATE_COLORS = {
+    [craftLib.CRAFTING] = palette.green,
+    [craftLib.STALLED]  = palette.amber,
+    [craftLib.IDLE]     = palette.muted,
+    [craftLib.MISSING]  = palette.red,
+}
+
+-- One column of the chain breakdown.
+--
+-- The three lists are shown side by side because that IS the shape of the data:
+-- AE2 keeps a set per category, not a sequence, so a numbered list would invent
+-- an order the network does not have.
+local function itemColumn(x, row, width, title, list, theme, limit)
+    graphics.text(x, row, title, theme.muted, true)
+    if #list == 0 then
+        graphics.text(x, row + 1, "—", theme.muted, true)
+        return
+    end
+    for i = 1, math.min(#list, limit) do
+        local item = list[i]
+        graphics.text(x, row + i, text.fit(item.size .. "x " .. item.label, width),
+            palette.text, true)
+    end
+    if #list > limit then
+        graphics.text(x, row + limit + 1, "+" .. (#list - limit) .. " more", theme.muted, true)
+    end
+end
+
+function app:drawCrafting(width, rows, theme)
+    graphics.text(2, 1, "Crafting", theme.primary, true)
+    graphics.text(11, 1, "· click a CPU to break down its chain", theme.muted, true)
+    panel.rule(2, 2, width - 2, theme)
+
+    if not self.craft then
+        graphics.text(2, 4, "Crafting monitoring is switched off in the config.", theme.muted, true)
+        graphics.text(2, 5, "Set craft.enabled = true in settings/config and restart.",
+            theme.muted, true)
+        return
+    end
+
+    local summary = self.craft:summary()
+    if summary.error then
+        graphics.text(2, 4, "No ME network: " .. summary.error, palette.amber, true)
+        graphics.text(2, 6, "ARGUS reads crafting through an Adapter touching an ME Controller",
+            theme.muted, true)
+        graphics.text(2, 7, "(or an ME Interface), connected to this computer.", theme.muted, true)
+        graphics.text(2, 9, "Run tools/medump.lua to see every component and what the",
+            theme.muted, true)
+        graphics.text(2, 10, "driver exposes.", theme.muted, true)
+        return
+    end
+
+    local jobs = self.craft:list()
+    graphics.text(2, 3, string.format("%d CPU(s) · %d busy · %d stalled",
+        summary.total, summary.busy, summary.stalled),
+        summary.stalled > 0 and palette.amber or theme.muted, true)
+
+    -- List -------------------------------------------------------------------
+    local row = 5
+    local listBottom = math.min(rows - 14, 5 + #jobs - 1)
+
+    for _, job in ipairs(jobs) do
+        if row > listBottom then break end
+
+        local ordered = "—"
+        if job.output then
+            ordered = job.output.size .. "x " .. job.output.label
+        elseif job.outputError and tostring(job.outputError):find("monitor") then
+            ordered = "(no Crafting Monitor)"
+        end
+
+        local caption = string.format("%-14s %-30s %s",
+            text.fit(job.cpuName, 14),
+            text.fit(ordered, 30),
+            job.state == craftLib.STALLED
+                and ("STALLED " .. time.format(job.stalledFor or 0))
+                or job.state)
+
+        widgets.listItem(2, row, width - 4, caption, theme, job.id == self.selectedCpu,
+            function() self.selectedCpu = job.id self.dirty = true end, nil, job.busy)
+        row = row + 1
+    end
+
+    if #jobs == 0 then
+        graphics.text(2, 5, "The ME network reports no crafting CPUs.", theme.muted, true)
+        graphics.text(2, 6, "Assemble at least one CPU from Crafting Storage blocks.",
+            theme.muted, true)
+        return
+    end
+
+    -- Detail ------------------------------------------------------------------
+    -- Keep the selection valid: a CPU can be dismantled while this page is open,
+    -- and the previous selection would then address a job that no longer exists.
+    local job = self.craft:get(self.selectedCpu)
+    if not job then
+        job = jobs[1]
+        self.selectedCpu = job.id
+    end
+
+    row = row + 1
+    panel.rule(2, row, width - 2, theme)
+    row = row + 1
+
+    graphics.text(2, row, job.cpuName, theme.text, true)
+    graphics.text(2 + text.len(job.cpuName) + 2, row,
+        string.format("· %d bytes · %d co-processor(s)", job.storage, job.coprocessors),
+        theme.muted, true)
+    row = row + 2
+
+    if not job.busy then
+        graphics.text(2, row, "Idle — no job on this CPU.", theme.muted, true)
+        return
+    end
+
+    -- Ordered ----------------------------------------------------------------
+    graphics.text(2, row, "Ordered", theme.muted, true)
+    if job.output then
+        graphics.text(14, row, job.output.size .. "x " .. job.output.label, palette.text, true)
+    elseif job.outputError and tostring(job.outputError):find("monitor") then
+        -- Not a bug and not fixable in software: the driver reads the final
+        -- output off a Crafting Monitor block inside the CPU cluster.
+        graphics.text(14, row, "unknown — this CPU has no Crafting Monitor block",
+            palette.amber, true)
+        graphics.text(14, row + 1, "add one to the CPU multiblock and it appears here",
+            theme.muted, true)
+        row = row + 1
+    else
+        graphics.text(14, row, "unknown — " .. tostring(job.outputError or "?"), theme.muted, true)
+    end
+    row = row + 2
+
+    -- Stall banner ------------------------------------------------------------
+    if job.state == craftLib.STALLED then
+        graphics.text(2, row, "PAUSED", palette.amber, true)
+        graphics.text(14, row, string.format("nothing has changed for %s — %s",
+            time.format(job.stalledFor or 0), job.stallReason or "no progress"),
+            palette.amber, true)
+        row = row + 1
+        if job.next then
+            graphics.text(14, row, "expected next: " .. job.next.size .. "x " .. job.next.label,
+                palette.amber, true)
+            row = row + 1
+        end
+        row = row + 1
+    end
+
+    -- Chain -------------------------------------------------------------------
+    local column = math.floor((width - 6) / 3)
+    local limit = math.max(1, rows - row - 3)
+
+    itemColumn(2, row, column - 2, "In machines now", job.active, theme, limit)
+    itemColumn(2 + column, row, column - 2, "Waiting", job.pending, theme, limit)
+    itemColumn(2 + column * 2, row, column - 2, "Already made", job.stored, theme, limit)
+
+    -- Said once, plainly, rather than implied by the column heading: AE2 hands
+    -- out a set here, and a player reading "Waiting" top-to-bottom would
+    -- otherwise reasonably assume it is the running order.
+    graphics.text(2, rows - 2,
+        "Order is not exposed by AE2 — a job is a tree of parallel tasks, so \"Waiting\" is sorted by amount, not by turn.",
+        theme.muted, true)
+end
+
 function app:footer(width, rows, theme)
     local row = rows
     panel.rule(2, rows - 1, width - 2, theme)
@@ -588,6 +823,10 @@ function app:footer(width, rows, theme)
     x = x + widgets.button(x, row, "Glasses", theme, function()
         self.page = "glasses" self.dirty = true
     end, nil, self.page == "glasses") + 1
+
+    x = x + widgets.button(x, row, "Crafting", theme, function()
+        self.page = "crafting" self.dirty = true
+    end, nil, self.page == "crafting") + 1
 
     x = x + widgets.button(x, row, "Network", theme, function()
         self.page = "network" self.dirty = true
@@ -626,6 +865,8 @@ function app:draw()
         self:drawBuffers(width, rows, theme)
     elseif self.page == "glasses" then
         self:drawGlasses(width, rows, theme)
+    elseif self.page == "crafting" then
+        self:drawCrafting(width, rows, theme)
     elseif self.page == "network" then
         self:drawNetwork(width, rows, theme)
     else

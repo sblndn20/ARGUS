@@ -173,8 +173,48 @@ stage("lsc-1", "Main LSC", 4.4e17, "440000000000000000", 1.4757395258968e19,
     32768, 12000, 1328)
 stage("bb-1", "Battery Buffer", 1234, nil, 5678, 12, 34, 0, states.IDLE)
 
+-- A staged ME network, for the Crafting page. Same approach as the buffers
+-- above: the jobs are hand-built rather than read from a component, so the
+-- layout can be previewed without an ME controller. One job is stalled, since
+-- that is the row with the most to render.
+local craftLib = require("core.craft")
+
+local craftMonitor = craftLib.new(config)
+
+local function item(label, size) return {name = "mod:" .. label, label = label, size = size, damage = 0} end
+
+local function stageJob(job)
+    craftMonitor.jobs[job.id] = job
+    table.insert(craftMonitor.order, job.id)
+end
+
+stageJob({
+    id = "me-1#0", address = "me-1", cpuName = "Assembly Line", busy = true,
+    storage = 262144, coprocessors = 8,
+    state = craftLib.CRAFTING, stalledFor = 0,
+    output = item("Titanium Ingot", 64),
+    active = {item("Magnesium Dust", 30), item("Rutile", 12)},
+    pending = {item("Titanium Tetrachloride", 4), item("Salt", 9)},
+    stored = {item("Coke", 5)},
+    now = item("Magnesium Dust", 30), next = item("Salt", 9),
+})
+stageJob({
+    id = "me-1#1", address = "me-1", cpuName = "Circuits", busy = true,
+    storage = 65536, coprocessors = 2,
+    state = craftLib.STALLED, stalledFor = 340, stallReason = "nothing dispatched to any machine",
+    output = item("Advanced Circuit", 16),
+    active = {}, pending = {item("Silicon Wafer", 8)}, stored = {item("Redstone", 24)},
+    now = nil, next = item("Silicon Wafer", 8),
+})
+stageJob({
+    id = "me-1#2", address = "me-1", cpuName = "Spare", busy = false,
+    storage = 4096, coprocessors = 0,
+    state = craftLib.IDLE, stalledFor = 0,
+    active = {}, pending = {}, stored = {},
+})
+
 local page = (...) or "dashboard"
-local application = app.new(monitor, config)
+local application = app.new(monitor, config, nil, nil, craftMonitor)
 application.page = page
 application:draw()
 
