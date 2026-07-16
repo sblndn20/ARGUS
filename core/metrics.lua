@@ -4,11 +4,15 @@
 -- than from EU IN minus EU OUT. That works for every source (IC2 storage
 -- exposes no throughput at all) and it accounts for passive loss automatically.
 --
--- Three rings keep memory flat while covering three time scales. Each is a
--- fixed number of slots, so an hour of history costs the same as a minute:
---   fast   ~15s  — the live rate
---   medium ~10m  — the default graph scale
---   slow   ~65m  — the 1-hour average and the wide graph
+-- Three rings keep memory flat. Each is a fixed number of slots, so an hour of
+-- history costs exactly what a minute does:
+--   fast   — the live rate, sampled every poll
+--   graph  — whatever the user is looking at; its interval is derived from the
+--            chosen window, so a 2-minute window means one point per second
+--   slow   — the 1-hour average
+--
+-- The graph gets its own ring rather than a fixed set of scales: one ring that
+-- follows the window is both cheaper and lets any window be chosen.
 --
 -- Precision note: `stored` is a Lua double, so past 2^53 EU its ULP grows to
 -- hundreds of EU. That is irrelevant for a rate — the delta over a multi-second
@@ -18,29 +22,50 @@ local ring = require("core.ring")
 
 local metrics = {}
 
-local FAST_CAPACITY = 60      -- ~15s at 4 Hz
-local MEDIUM_CAPACITY = 120   -- ~10min at 1 sample / 5s
-local MEDIUM_INTERVAL = 5
+local FAST_CAPACITY = 60      -- the live rate window
 local SLOW_CAPACITY = 130     -- ~65min at 1 sample / 30s
 local SLOW_INTERVAL = 30
 
+-- Points the graph keeps. Also the width it is drawn at, so one sample is one
+-- column and nothing is thrown away or interpolated.
+local GRAPH_COLUMNS = 120
+metrics.GRAPH_COLUMNS = GRAPH_COLUMNS
+
 local TICKS_PER_SECOND = 20
 
-function metrics.new()
+-- Sample spacing for a given window. This is the whole point of the design: the
+-- window divided by the column count IS the step, so a 2-minute window plots one
+-- point per second. Floored at the poll rate, below which there is nothing new
+-- to record.
+function metrics.intervalFor(windowSeconds)
+    return math.max(0.25, (windowSeconds or 600) / GRAPH_COLUMNS)
+end
+
+function metrics.new(graphInterval)
     return {
         fast = ring.new(FAST_CAPACITY),
-        medium = ring.new(MEDIUM_CAPACITY),
+        graph = ring.new(GRAPH_COLUMNS),
         slow = ring.new(SLOW_CAPACITY),
-        lastMedium = nil,
+        graphInterval = graphInterval or metrics.intervalFor(600),
+        lastGraph = nil,
         lastSlow = nil,
     }
 end
 
+-- Re-space the graph. The samples already collected sit at the old spacing, so
+-- keeping them would draw a curve whose X axis lies; drop them and refill.
+function metrics.setGraphInterval(tracker, interval)
+    if tracker.graphInterval == interval then return end
+    tracker.graphInterval = interval
+    tracker.graph:clear()
+    tracker.lastGraph = nil
+end
+
 function metrics.update(tracker, stored, now)
     tracker.fast:push(now, stored)
-    if not tracker.lastMedium or (now - tracker.lastMedium) >= MEDIUM_INTERVAL then
-        tracker.medium:push(now, stored)
-        tracker.lastMedium = now
+    if not tracker.lastGraph or (now - tracker.lastGraph) >= tracker.graphInterval then
+        tracker.graph:push(now, stored)
+        tracker.lastGraph = now
     end
     if not tracker.lastSlow or (now - tracker.lastSlow) >= SLOW_INTERVAL then
         tracker.slow:push(now, stored)
@@ -52,17 +77,15 @@ end
 -- across a discontinuity in `stored`.
 function metrics.reset(tracker)
     tracker.fast:clear()
-    tracker.medium:clear()
+    tracker.graph:clear()
     tracker.slow:clear()
-    tracker.lastMedium, tracker.lastSlow = nil, nil
+    tracker.lastGraph, tracker.lastSlow = nil, nil
 end
 
--- Ring backing a given graph scale, so the UI can plot history without the
--- monitor keeping a second copy of it.
-function metrics.series(tracker, scale)
-    if scale == "fast" then return tracker.fast end
-    if scale == "slow" then return tracker.slow end
-    return tracker.medium
+-- The ring behind the graph, so the UI can plot history without the monitor
+-- keeping a second copy of it.
+function metrics.series(tracker)
+    return tracker.graph
 end
 
 local function slope(buffer, now, window)

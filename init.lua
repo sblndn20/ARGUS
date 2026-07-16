@@ -67,6 +67,9 @@ end
 
 local function restoreScreen()
     if not component.isAvailable("gpu") then return end
+    -- Hand the offscreen buffer back; GPU buffers are a finite resource and
+    -- would otherwise stay claimed until the machine reboots.
+    graphics.release()
     local gpu = component.gpu
     pcall(gpu.setBackground, 0x000000)
     pcall(gpu.setForeground, 0xFFFFFF)

@@ -38,10 +38,16 @@ function monitor.new(config)
     }, monitor)
 end
 
+-- Sample spacing the graph should currently use, from the chosen window.
+function monitor:graphInterval()
+    local screen = self.config.screen or {}
+    return metrics.intervalFor(screen.graphWindow or 600)
+end
+
 function monitor:tracker(id)
     local tracker = self.trackers[id]
     if not tracker then
-        tracker = metrics.new()
+        tracker = metrics.new(self:graphInterval())
         self.trackers[id] = tracker
     end
     return tracker
@@ -50,6 +56,8 @@ end
 -- Build a view and fold in the derived numbers.
 function monitor:buildView(id, base, now)
     local tracker = self:tracker(id)
+    -- Picks up a window the user changed since the last poll.
+    metrics.setGraphInterval(tracker, self:graphInterval())
 
     if base.state == states.MISSING then
         -- Do not let a gap in readings become a fake spike in the rate.

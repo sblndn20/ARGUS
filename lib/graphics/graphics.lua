@@ -9,7 +9,27 @@
 
 local graphics = {}
 
-local context = {gpu = nil, width = 0, height = 0}
+local context = {gpu = nil, width = 0, height = 0, buffer = nil}
+
+-- Try to claim an offscreen GPU buffer for double buffering.
+--
+-- pcall rather than a type check on purpose: OpenComputers exposes proxy
+-- methods as callable TABLES, so `type(gpu.allocateBuffer) == "function"` is
+-- false even when the method is right there. pcall answers the real question —
+-- can this be called and does it work.
+local function allocateBuffer()
+    if context.buffer then
+        pcall(function() context.gpu.freeBuffer(context.buffer) end)
+        context.buffer = nil
+    end
+    local ok, index = pcall(function()
+        return context.gpu.allocateBuffer(context.width, context.height)
+    end)
+    if ok and type(index) == "number" and index > 0 then
+        return index
+    end
+    return nil
+end
 
 function graphics.setContext(ctx)
     if ctx and ctx.gpu then
@@ -23,7 +43,45 @@ function graphics.setContext(ctx)
         context.width = width
         context.height = height
     end
+    context.fg = nil
+    context.buffer = allocateBuffer()
     return context
+end
+
+function graphics.isBuffered() return context.buffer ~= nil end
+
+-- Start drawing a frame offscreen.
+--
+-- Without this, the client renders half-finished frames: clear() blanks the
+-- screen and the ~100 gpu.set calls that repaint it land over several client
+-- frames, which reads as flicker. Rendering into a buffer and blitting it in
+-- one call makes the update atomic as far as the viewer is concerned.
+--
+-- allocateBuffer needs a Tier 3 GPU. On anything less this is a no-op and
+-- drawing goes straight to the screen — flickery, but working.
+function graphics.beginFrame()
+    if not context.buffer then return end
+    -- Buffer state is per-buffer, so the cached foreground no longer applies.
+    context.fg = nil
+    pcall(function() context.gpu.setActiveBuffer(context.buffer) end)
+end
+
+function graphics.endFrame()
+    if not context.buffer then return end
+    pcall(function()
+        context.gpu.setActiveBuffer(0)
+        context.gpu.bitblt(0, 1, 1, context.width, context.height, context.buffer, 1, 1)
+    end)
+    context.fg = nil
+end
+
+function graphics.release()
+    if not context.buffer then return end
+    pcall(function()
+        context.gpu.setActiveBuffer(0)
+        context.gpu.freeBuffer(context.buffer)
+    end)
+    context.buffer = nil
 end
 
 function graphics.context() return context end

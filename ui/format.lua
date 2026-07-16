@@ -51,6 +51,27 @@ function format.percent(fraction)
     return string.format("%.1f%%", fraction * 100)
 end
 
+-- A graph window as a short label: 30 -> "30 sec", 600 -> "10 min".
+function format.window(seconds)
+    seconds = math.floor(tonumber(seconds) or 0)
+    if seconds < 60 then return seconds .. " sec" end
+    if seconds < 3600 then return math.floor(seconds / 60) .. " min" end
+    local hours = seconds / 3600
+    -- Avoid "1.0 h" for the common exact case.
+    if hours == math.floor(hours) then return math.floor(hours) .. " h" end
+    return string.format("%.1f h", hours)
+end
+
+-- The graph's sample spacing, spelled out so the resolution is never a guess.
+function format.step(seconds)
+    if seconds < 1 then return string.format("%.2gs/pt", seconds) end
+    if seconds < 60 then
+        local whole = math.floor(seconds + 0.5)
+        return whole .. "s/pt"
+    end
+    return math.floor(seconds / 60 + 0.5) .. "m/pt"
+end
+
 -- "Time to full 2d 4h 13m", or nil when nothing is projected.
 function format.projection(seconds, direction)
     if not seconds or not direction then return nil end

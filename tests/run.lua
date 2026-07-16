@@ -370,6 +370,46 @@ tracker = metrics.new()
 metrics.update(tracker, 5000, 0)
 eq("rate needs two samples", metrics.rate(tracker, 0, 5), nil)
 
+-- Graph resolution ------------------------------------------------------------
+--
+-- The window divided by the column count is the sample step. That is what makes
+-- "one point per second" a thing you can ask for: pick a 120-second window.
+
+eq("a 2-minute window plots one point per second", metrics.intervalFor(120), 1)
+eq("a 10-minute window plots one point per 5s", metrics.intervalFor(600), 5)
+eq("an hour plots one point per 30s", metrics.intervalFor(3600), 30)
+-- Nothing new exists to record faster than the poll rate.
+eq("the step is floored at the poll rate", metrics.intervalFor(5), 0.25)
+
+-- A 1-second step must actually yield one sample per second.
+tracker = metrics.new(metrics.intervalFor(120))
+for i = 0, 20 do metrics.update(tracker, i * 1000, i * 1.0) end
+eq("a 1s step keeps one sample per second", metrics.series(tracker).count, 21)
+
+-- ...and a 5-second step must not.
+tracker = metrics.new(metrics.intervalFor(600))
+for i = 0, 20 do metrics.update(tracker, i * 1000, i * 1.0) end
+eq("a 5s step keeps one sample per five seconds", metrics.series(tracker).count, 5)
+
+-- Changing the window must drop the old samples: they sit at the old spacing,
+-- so plotting them under a new X axis would draw a lie.
+tracker = metrics.new(metrics.intervalFor(600))
+for i = 0, 40 do metrics.update(tracker, i * 1000, i * 1.0) end
+check("samples accumulate before the change", metrics.series(tracker).count > 0)
+metrics.setGraphInterval(tracker, metrics.intervalFor(120))
+eq("changing the window clears the graph", metrics.series(tracker).count, 0)
+eq("changing the window records the new step", tracker.graphInterval, 1)
+
+-- Setting the same interval must not throw history away.
+metrics.update(tracker, 1000, 100)
+metrics.setGraphInterval(tracker, metrics.intervalFor(120))
+eq("re-setting the same window keeps the graph", metrics.series(tracker).count, 1)
+
+-- The graph ring is capped, so a long window costs no more memory than a short.
+tracker = metrics.new(0.25)
+for i = 0, 400 do metrics.update(tracker, i, i * 0.25) end
+check("the graph ring stays bounded", metrics.series(tracker).count <= metrics.GRAPH_COLUMNS)
+
 local seconds, direction = metrics.projection(0, 1000000, 100)
 eq("projection direction is full when charging", direction, "full")
 near("projection time to full", seconds, 500) -- 1e6 EU / (100 EU/t * 20 t/s)

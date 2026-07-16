@@ -28,7 +28,9 @@ local function defaults()
         screen = {
             enabled = true,
             source = nil,          -- nil = aggregate
-            graphScale = "medium", -- fast | medium | slow
+            -- Graph window in seconds. The sample step follows from it
+            -- (window / 120 columns), so 120 plots one point per second.
+            graphWindow = 600,
             -- Seconds between component reads. Independent of the redraw rate:
             -- the UI animates at ~10 Hz regardless, so raising this costs
             -- freshness, not smoothness.

@@ -25,7 +25,11 @@ local arPanel = require("ar.panel")
 local app = {}
 app.__index = app
 
-local SCALE_ORDER = {"fast", "medium", "slow"}
+-- Graph windows offered by the footer button, in seconds. The sample step
+-- follows from the window (window / 120 columns), so 120 gives one point per
+-- second and 30 gives four per second — anything finer than the poll rate is
+-- floored by metrics.intervalFor.
+local GRAPH_WINDOWS = {30, 60, 120, 300, 600, 1800, 3600}
 
 -- Build identity, shown in the footer. An install that silently did not update
 -- is otherwise indistinguishable from one that did — mirrors serve cached
@@ -55,15 +59,30 @@ function app:notify(message)
     self.status = message
 end
 
-function app:nextScale()
-    local current = self.config.screen.graphScale
-    for i, scale in ipairs(SCALE_ORDER) do
-        if scale == current then
-            self.config.screen.graphScale = SCALE_ORDER[i % #SCALE_ORDER + 1]
+function app:nextGraphWindow()
+    local current = self.config.screen.graphWindow or 600
+    -- Land on the next preset larger than the current value, so a typed window
+    -- rejoins the cycle at a sensible place instead of jumping to the start.
+    for _, window in ipairs(GRAPH_WINDOWS) do
+        if window > current then
+            self.config.screen.graphWindow = window
             return
         end
     end
-    self.config.screen.graphScale = "medium"
+    self.config.screen.graphWindow = GRAPH_WINDOWS[1]
+end
+
+function app:typeGraphWindow(rows)
+    local typed = widgets.prompt(2, rows - 2, 20,
+        self.config.screen.graphWindow or 600, self.config.theme, true)
+    local seconds = tonumber(typed)
+    if seconds then
+        -- Below ~15s the window is shorter than the graph is wide and the curve
+        -- is mostly empty; above a day it is meaningless.
+        self.config.screen.graphWindow = math.floor(math.min(86400, math.max(15, seconds)))
+        self:notify("Graph window: " .. format.window(self.config.screen.graphWindow))
+    end
+    self.dirty = true
 end
 
 function app:save()
@@ -81,7 +100,8 @@ function app:drawDashboard(width, rows, theme)
     end
     panel.header(2, 1, width - 2, view, theme, palette)
     panel.rule(2, 2, width - 2, theme)
-    panel.draw(2, 4, width - 3, rows - 6, view, theme, palette, self.config.screen.graphScale)
+    panel.draw(2, 4, width - 3, rows - 6, view, theme, palette,
+        self.config.screen.graphWindow or 600)
 end
 
 function app:drawBuffers(width, rows, theme)
@@ -395,8 +415,10 @@ function app:footer(width, rows, theme)
         self.page = "glasses" self.dirty = true
     end, nil, self.page == "glasses") + 1
 
-    x = x + widgets.button(x, row, "Graph: " .. (panel.SCALE_LABELS[self.config.screen.graphScale] or "?"),
-        theme, function() self:nextScale() self.dirty = true end, nil, false) + 1
+    x = x + widgets.button(x, row, "Graph: " .. format.window(self.config.screen.graphWindow or 600),
+        theme, function() self:nextGraphWindow() self.dirty = true end, nil, false) + 1
+    x = x + widgets.button(x, row, "set", theme, function() self:typeGraphWindow(rows) end,
+        nil, false) + 1
 
     x = x + widgets.button(x, row, "Save", theme, function() self:save() end, nil, false) + 1
     x = x + widgets.button(x, row, "Quit", theme, function() self.running = false end, nil, false) + 2
@@ -416,6 +438,10 @@ function app:draw()
     local theme = self.config.theme
 
     widgets.reset()
+    -- Render the whole frame offscreen, then blit it in one go. Painting
+    -- directly to the screen shows the clear() and the repaint as separate
+    -- steps, which is what made the UI flicker.
+    graphics.beginFrame()
     graphics.clear()
 
     if self.page == "buffers" then
@@ -427,6 +453,7 @@ function app:draw()
     end
 
     self:footer(width, rows, theme)
+    graphics.endFrame()
 end
 
 function app:onTouch(x, row)

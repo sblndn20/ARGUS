@@ -28,10 +28,6 @@ local STATE_COLORS = {
     [states.MISSING] = "red",
 }
 
-local SCALE_LABELS = {fast = "15 sec", medium = "10 min", slow = "60 min"}
-
-panel.SCALE_LABELS = SCALE_LABELS
-
 -- Eased bar position per view, so the fill glides instead of snapping between
 -- readings. Keyed by view id and kept here rather than on the view because a
 -- view is rebuilt from scratch on every poll.
@@ -73,7 +69,7 @@ end
 
 -- Draws the dashboard body into the given rectangle.
 -- `rows` is the number of terminal rows available.
-function panel.draw(x, row, width, rows, view, theme, palette, graphScale)
+function panel.draw(x, row, width, rows, view, theme, palette, graphWindow)
     local bottom = row + rows - 1
 
     -- Charge headline -------------------------------------------------------
@@ -136,9 +132,12 @@ function panel.draw(x, row, width, rows, view, theme, palette, graphScale)
     -- the numbers above it stop being the focus.
     local graphRows = math.min(bottom - graphTop, 12)
     if graphRows >= 3 then
-        label(x, graphTop - 1, "Charge · last " .. (SCALE_LABELS[graphScale] or "?"), theme)
+        -- Spell out the resolution: the same curve means very different things
+        -- at one point per second and one per half-minute.
+        label(x, graphTop - 1, "Charge · last " .. format.window(graphWindow)
+            .. " · " .. format.step(view.tracker.graphInterval), theme)
 
-        local series = metrics.series(view.tracker, graphScale)
+        local series = metrics.series(view.tracker)
         local height = graphRows * 2
         local min, max = graph.draw(x, drawingY(graphTop), width - 12, height, series, {
             muted = screen.blend(theme.muted, theme.background, 0.5),
